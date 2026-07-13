@@ -8,11 +8,11 @@ local CONFIG = {
             HealthBar = true, TracerOrigin = "Bottom", MaxDistance = 500,
             TeamCheck = true, Color = Color3.fromRGB(255, 50, 50),
             TeamColor = Color3.fromRGB(50, 255, 50) },
-    Aimbot = { Enabled = true, KeyBind = "MouseButton2", Smoothness = 0.6,
-               MaxDistance = 250, FOV = 90, ShowFOV = true, AimAt = "Head",
+    Aimbot = { Enabled = true, Smoothness = 0.6,
+               MaxDistance = 250, FOV = 120, ShowFOV = true, AimAt = "Head",
                TeamCheck = true, VisibleCheck = false, AutoFire = false,
                AutoFireRange = 20, Prediction = 0 },
-    UI = { ToggleKey = Enum.KeyCode.RightShift, ShowDebug = true },
+    UI = { ToggleKey = Enum.KeyCode.RightShift },
 }
 
 -- ==================== 初始化 ====================
@@ -20,17 +20,30 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
 local Workspace = game:GetService("Workspace")
-local Camera = Workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 
-local Aimbot = { Target = nil, Active = false }
+-- Camera可能为nil，需要动态获取
+local function GetCamera()
+    return Workspace.CurrentCamera
+end
+
+-- ==================== 平台检测 ====================
+local IsMobile = (UserInputService.TouchEnabled and not UserInputService.MouseEnabled)
+local IsPC = not IsMobile
+
+local Aimbot = { Target = nil, Active = false, TouchPos = nil }
 local ESP_Objects = {}
+local ESP_Connections = {}
+local ScriptCleanup = {}
 
 -- ==================== 工具函数 ====================
 local function Log(msg, level)
     level = level or "INFO"
-    local colors = { INFO = "[SCP]", WARN = "[⚠]", ERR = "[✖]", OK = "[✓]" }
-    print(string.format("%s %s", colors[level] or "[SCP]", msg))
+    local tag = (level == "OK" and "[✓]" or
+                 level == "WARN" and "[⚠]" or
+                 level == "ERR" and "[✖]" or
+                 "[SCP]")
+    print(string.format("%s %s", tag, msg))
 end
 
 local function IsPlayerValid(plr)
@@ -62,6 +75,7 @@ local function ShouldTargetAimbot(plr)
 end
 
 local function GetCharacterPart(character, partName)
+    if not character then return nil end
     if partName == "Head" then
         return character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart")
     elseif partName == "HumanoidRootPart" then
@@ -83,85 +97,120 @@ FOVCircle.NumSides = 64
 FOVCircle.Radius = CONFIG.Aimbot.FOV
 FOVCircle.Color = Color3.fromRGB(50, 200, 255)
 FOVCircle.Filled = false
-FOVCircle.Visible = CONFIG.Aimbot.ShowFOV
+FOVCircle.Visible = (CONFIG.Aimbot.Enabled and CONFIG.Aimbot.ShowFOV)
 
 local function UpdateFOV()
-    FOVCircle.Visible = CONFIG.Aimbot.Enabled and CONFIG.Aimbot.ShowFOV
+    local cam = GetCamera()
+    if not cam then
+        FOVCircle.Visible = false
+        return
+    end
+
+    FOVCircle.Visible = (CONFIG.Aimbot.Enabled and CONFIG.Aimbot.ShowFOV)
+    if not FOVCircle.Visible then return end
+
     FOVCircle.Radius = CONFIG.Aimbot.FOV
-    if CONFIG.Aimbot.KeyBind == "MouseButton2" then
-        local mousePos = UserInputService:GetMouseLocation()
-        FOVCircle.Position = mousePos
+
+    if IsMobile and Aimbot.TouchPos then
+        FOVCircle.Position = Aimbot.TouchPos
+    elseif IsPC then
+        FOVCircle.Position = UserInputService:GetMouseLocation()
     else
-        FOVCircle.Position = Camera.ViewportSize / 2
+        FOVCircle.Position = cam.ViewportSize / 2
     end
 end
 
 -- ==================== ESP ====================
 local function CreateESP(plr)
-    if ESP_Objects[plr] then return end
-    local d = {}
-    local function make(k, t, props)
-        if k ~= "HealthBar" and k ~= "HealthBg" then
-            if CONFIG.ESP[k] == nil then return nil end
+    if ESP_Objects[plr] then
+        -- 玩家已存在，重置Drawing可见性
+        for _, d in pairs(ESP_Objects[plr]) do
+            d.Visible = false
         end
-        local obj = Drawing.new(t)
+        return
+    end
+
+    local d = {}
+    local function make(key, drawType, props)
+        local obj = Drawing.new(drawType)
         for pk, pv in pairs(props or {}) do obj[pk] = pv end
         obj.Visible = false
-        d[k] = obj
+        d[key] = obj
         return obj
     end
+
     make("Box", "Square", { Thickness = 1, Filled = false })
     make("Line", "Line", { Thickness = 1 })
-    make("Name", "Text", { Center = true, Outline = true, Size = 14 })
-    make("Distance", "Text", { Center = true, Outline = true, Size = 12 })
+    make("Name", "Text", { Center = true, Outline = true, Size = IsMobile and 12 or 14 })
+    make("Distance", "Text", { Center = true, Outline = true, Size = IsMobile and 10 or 12 })
     make("HealthBg", "Square", { Thickness = 0, Filled = true, Color = Color3.fromRGB(30, 30, 30) })
     make("HealthBar", "Square", { Thickness = 0, Filled = true })
+
     ESP_Objects[plr] = d
 end
 
 local function RemoveESP(plr)
     local d = ESP_Objects[plr]
     if d then
-        for _, o in pairs(d) do pcall(function() o:Remove() end) end
+        for _, obj in pairs(d) do
+            pcall(function() obj:Remove() end)
+        end
         ESP_Objects[plr] = nil
     end
 end
 
-local function UpdateESP()
-    local myChar, myRoot = LocalPlayer.Character, nil
-    if myChar then myRoot = myChar:FindFirstChild("HumanoidRootPart") end
-    if not myRoot then
-        for _, d in pairs(ESP_Objects) do
-            for _, o in pairs(d) do o.Visible = false end
+local function HideAllESP()
+    for _, d in pairs(ESP_Objects) do
+        for _, obj in pairs(d) do
+            obj.Visible = false
         end
+    end
+end
+
+local function UpdateESP()
+    local cam = GetCamera()
+    if not cam then
+        HideAllESP()
+        return
+    end
+
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then
+        HideAllESP()
         return
     end
 
     for plr, drawings in pairs(ESP_Objects) do
+        -- 检查玩家是否有效
         if not ShouldTargetESP(plr) then
-            for _, o in pairs(drawings) do o.Visible = false end
+            for _, obj in pairs(drawings) do obj.Visible = false end
             continue
         end
 
-        local char, root = plr.Character, nil
-        if char then root = char:FindFirstChild("HumanoidRootPart") end
+        local char = plr.Character
+        local root = char and char:FindFirstChild("HumanoidRootPart")
         local head = char and char:FindFirstChild("Head")
         local hum = char and char:FindFirstChildOfClass("Humanoid")
+
         if not root or not head or not hum then
-            for _, o in pairs(drawings) do o.Visible = false end
+            for _, obj in pairs(drawings) do obj.Visible = false end
             continue
         end
 
+        -- 距离检测
         local dist = (root.Position - myRoot.Position).Magnitude
         if dist > CONFIG.ESP.MaxDistance then
-            for _, o in pairs(drawings) do o.Visible = false end
+            for _, obj in pairs(drawings) do obj.Visible = false end
             continue
         end
 
-        local headPos, onScreenH = Camera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
-        local rootPos, onScreenR = Camera:WorldToViewportPoint(root.Position - Vector3.new(0, 0.2, 0))
+        -- 屏幕坐标
+        local headPos, onScreenH = cam:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+        local rootPos, onScreenR = cam:WorldToViewportPoint(root.Position - Vector3.new(0, 0.2, 0))
+
         if not onScreenH and not onScreenR then
-            for _, o in pairs(drawings) do o.Visible = false end
+            for _, obj in pairs(drawings) do obj.Visible = false end
             continue
         end
 
@@ -170,72 +219,102 @@ local function UpdateESP()
 
         local boxH = math.abs(headPos.Y - rootPos.Y)
         local boxW = boxH * 0.65
-        local boxX, boxY = rootPos.X - boxW / 2, rootPos.Y
+        local boxX = rootPos.X - boxW / 2
+        local boxY = rootPos.Y
 
+        -- 方框
         if drawings.Box then
-            drawings.Box.Size = Vector2.new(boxW, boxH)
+            drawings.Box.Size = Vector2.new(math.max(boxW, 4), math.max(boxH, 4))
             drawings.Box.Position = Vector2.new(boxX, boxY - boxH)
-            drawings.Box.Color = color; drawings.Box.Visible = CONFIG.ESP.Box
+            drawings.Box.Color = color
+            drawings.Box.Visible = CONFIG.ESP.Box
         end
 
+        -- 底线
         if drawings.Line then
-            local ss = Camera.ViewportSize
+            local ss = cam.ViewportSize
             local ox, oy
-            if CONFIG.ESP.TracerOrigin == "Middle" then ox, oy = ss.X / 2, ss.Y / 2
-            elseif CONFIG.ESP.TracerOrigin == "Mouse" then local m = UserInputService:GetMouseLocation(); ox, oy = m.X, m.Y
-            else ox, oy = ss.X / 2, ss.Y end
+            if CONFIG.ESP.TracerOrigin == "Middle" then
+                ox, oy = ss.X / 2, ss.Y / 2
+            elseif CONFIG.ESP.TracerOrigin == "Mouse" then
+                if IsMobile and Aimbot.TouchPos then
+                    ox, oy = Aimbot.TouchPos.X, Aimbot.TouchPos.Y
+                else
+                    local m = UserInputService:GetMouseLocation()
+                    ox, oy = m.X, m.Y
+                end
+            else -- Bottom
+                ox, oy = ss.X / 2, ss.Y
+            end
             drawings.Line.From = Vector2.new(ox, oy)
             drawings.Line.To = Vector2.new(rootPos.X, rootPos.Y)
-            drawings.Line.Color = color; drawings.Line.Visible = CONFIG.ESP.Line
+            drawings.Line.Color = color
+            drawings.Line.Visible = CONFIG.ESP.Line
         end
 
+        -- 名字
         if drawings.Name then
             drawings.Name.Text = plr.Name
             drawings.Name.Position = Vector2.new(rootPos.X, boxY - boxH - 18)
-            drawings.Name.Color = color; drawings.Name.Visible = CONFIG.ESP.Name
+            drawings.Name.Color = color
+            drawings.Name.Visible = CONFIG.ESP.Name
         end
 
+        -- 距离
         if drawings.Distance then
-            drawings.Distance.Text = string.format("%.0f studs [%s]", dist, isPvP and "PVP" or "Safe")
+            drawings.Distance.Text = string.format("%.0f [%s]", dist, isPvP and "⚔" or "✓")
             drawings.Distance.Position = Vector2.new(rootPos.X, boxY + 2)
             drawings.Distance.Color = Color3.fromRGB(200, 200, 200)
             drawings.Distance.Visible = CONFIG.ESP.Distance
         end
 
+        -- 血条
         if drawings.HealthBar and drawings.HealthBg then
             local hp = math.clamp(hum.Health / hum.MaxHealth, 0, 1)
-            local bw, bx = 4, boxX - 6
+            local bw = 4
+            local bx = boxX - 6
+
             drawings.HealthBg.Size = Vector2.new(bw, boxH)
             drawings.HealthBg.Position = Vector2.new(bx, boxY - boxH)
             drawings.HealthBg.Visible = CONFIG.ESP.HealthBar
-            drawings.HealthBar.Size = Vector2.new(bw, boxH * hp)
+
+            drawings.HealthBar.Size = Vector2.new(bw, math.max(boxH * hp, 0))
             drawings.HealthBar.Position = Vector2.new(bx, boxY - boxH + boxH * (1 - hp))
-            drawings.HealthBar.Color = Color3.fromRGB(math.floor((1 - hp) * 255), math.floor(hp * 255), 0)
+            drawings.HealthBar.Color = Color3.fromRGB(
+                math.floor((1 - hp) * 255),
+                math.floor(hp * 255),
+                0
+            )
             drawings.HealthBar.Visible = CONFIG.ESP.HealthBar
         end
     end
 end
-
 -- ==================== 自瞄 ====================
 local function FindTarget()
+    local cam = GetCamera()
+    if not cam then return nil, nil end
+
     local closestDist = CONFIG.Aimbot.FOV
     local closestPlr, closestPart = nil, nil
     local centerPos
-    if CONFIG.Aimbot.KeyBind == "MouseButton2" then
-        centerPos = UserInputService:GetMouseLocation()
+
+    if IsMobile and Aimbot.TouchPos then
+        centerPos = Aimbot.TouchPos
     else
-        centerPos = Camera.ViewportSize / 2
+        centerPos = UserInputService:GetMouseLocation()
     end
 
     for _, plr in ipairs(Players:GetPlayers()) do
         if not ShouldTargetAimbot(plr) then continue end
         local tp = GetCharacterPart(plr.Character, CONFIG.Aimbot.AimAt)
         if not tp then continue end
-        local pos, onScreen = Camera:WorldToViewportPoint(tp.Position)
+        local pos, onScreen = cam:WorldToViewportPoint(tp.Position)
         if not onScreen then continue end
         local screenDist = (Vector2.new(pos.X, pos.Y) - centerPos).Magnitude
         if screenDist < closestDist then
-            closestDist = screenDist; closestPlr = plr; closestPart = tp
+            closestDist = screenDist
+            closestPlr = plr
+            closestPart = tp
         end
     end
     return closestPlr, closestPart
@@ -249,8 +328,10 @@ local function AimAtTarget(target, targetPart)
     if not myRoot then return end
 
     local targetPos = targetPart.Position
+
+    -- 提前量预测
     if CONFIG.Aimbot.Prediction > 0 then
-        local targetRoot = target.Character:FindFirstChild("HumanoidRootPart")
+        local targetRoot = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
         if targetRoot then
             local vel = targetRoot.Velocity
             local dist = (myRoot.Position - targetPos).Magnitude
@@ -271,14 +352,16 @@ local function TryAutoFire(target)
     if not CONFIG.Aimbot.AutoFire or not target or not target.Character then return end
     local myChar = LocalPlayer.Character
     if not myChar then return end
-    local myRoot, tRoot = myChar:FindFirstChild("HumanoidRootPart"), target.Character:FindFirstChild("HumanoidRootPart")
+    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
+    local tRoot = target.Character:FindFirstChild("HumanoidRootPart")
     if not myRoot or not tRoot then return end
     if (myRoot.Position - tRoot.Position).Magnitude > CONFIG.Aimbot.AutoFireRange then return end
 
     local function tryEquipAndAttack(tool)
         if not tool or not tool:IsA("Tool") then return false end
         if tool.Parent ~= myChar then
-            pcall(function() tool.Parent = myChar end)
+            local success = pcall(function() tool.Parent = myChar end)
+            if not success then return false end
             task.wait(0.05)
         end
         if tool.Parent == myChar then
@@ -298,83 +381,266 @@ local function TryAutoFire(target)
         end
     end
 end
+
+-- ==================== 移动端触摸控制 ====================
+local TouchAimActive = false
+local MenuToggleBtn = nil
+local MobileTouchConnections = {}
+
+local function SetupMobileControls()
+    if not IsMobile then return end
+
+    -- 查找或创建安全可用的父级ScreenGui
+    local playerGui = LocalPlayer:WaitForChild("PlayerGui")
+    local targetParent = playerGui:FindFirstChild("SCPScriptUI") or playerGui
+
+    -- 创建浮动菜单按钮
+    MenuToggleBtn = Instance.new("TextButton")
+    MenuToggleBtn.Name = "SCPMenuToggle"
+    MenuToggleBtn.Size = UDim2.new(0, 50, 0, 50)
+    MenuToggleBtn.Position = UDim2.new(0.95, -55, 0.05, 5)
+    MenuToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+    MenuToggleBtn.BackgroundTransparency = 0.15
+    MenuToggleBtn.BorderSizePixel = 0
+    MenuToggleBtn.Text = "⚙"
+    MenuToggleBtn.TextColor3 = Color3.fromRGB(50, 200, 255)
+    MenuToggleBtn.TextSize = 24
+    MenuToggleBtn.Font = Enum.Font.GothamBold
+    MenuToggleBtn.Active = true
+    MenuToggleBtn.Draggable = true
+    MenuToggleBtn.Parent = targetParent
+
+    local btnCorner = Instance.new("UICorner")
+    btnCorner.CornerRadius = UDim.new(0, 12)
+    btnCorner.Parent = MenuToggleBtn
+
+    local btnStroke = Instance.new("UIStroke")
+    btnStroke.Color = Color3.fromRGB(50, 200, 255)
+    btnStroke.Thickness = 1.5
+    btnStroke.Parent = MenuToggleBtn
+
+    -- ⚙按钮点击开关菜单
+    local btnConnection = MenuToggleBtn.MouseButton1Click:Connect(function()
+        MenuOpen = not MenuOpen
+        if Frame then Frame.Visible = MenuOpen end
+        Log(string.format("菜单 %s", MenuOpen and "打开" or "关闭"))
+    end)
+    table.insert(MobileTouchConnections, btnConnection)
+
+    -- 触摸自瞄：手指按下开启，松手关闭
+    local function onTouchStart(touch, gameProcessed)
+        -- 如果菜单开着，不启动自瞄
+        if MenuOpen then return end
+        -- 如果被UI消费了（按到了按钮等），不启动自瞄
+        if gameProcessed then return end
+        Aimbot.TouchPos = touch.Position
+        TouchAimActive = true
+    end
+
+    local function onTouchMove(touch, gameProcessed)
+        -- 即使gameProcessed为true，只要自瞄活跃就更新位置
+        -- 但菜单打开时不更新
+        if MenuOpen then return end
+        if TouchAimActive then
+            Aimbot.TouchPos = touch.Position
+        end
+    end
+
+    local function onTouchEnd(touch, gameProcessed)
+        -- ★修复关键Bug：无论gameProcessed是什么，只要自瞄活跃就关闭
+        -- 避免触摸UI元素后自瞄卡死
+        if TouchAimActive then
+            TouchAimActive = false
+            Aimbot.TouchPos = nil
+            Aimbot.Target = nil
+        end
+    end
+
+    local conn1 = UserInputService.TouchStarted:Connect(onTouchStart)
+    local conn2 = UserInputService.TouchMoved:Connect(onTouchMove)
+    local conn3 = UserInputService.TouchEnded:Connect(onTouchEnd)
+
+    table.insert(MobileTouchConnections, conn1)
+    table.insert(MobileTouchConnections, conn2)
+    table.insert(MobileTouchConnections, conn3)
+
+    Log("移动端触摸控制已启用 | 屏幕⚙按钮开关菜单 | 触摸屏幕自瞄", "OK")
+end
+
 -- ==================== UI菜单 ====================
 local MenuOpen = false
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "SCPScriptUI"; ScreenGui.ResetOnSpawn = false; ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.Name = "SCPScriptUI"
+ScreenGui.ResetOnSpawn = false
+ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+ScreenGui.IgnoreGuiInset = true
+
+local Frame = nil
+local DebugText = nil
+local StatusText = nil
 
 local function CreateUI()
     local frame = Instance.new("Frame")
-    frame.Size = UDim2.new(0, 420, 0, 580)
-    frame.Position = UDim2.new(0.5, -210, 0.5, -290)
+    Frame = frame
+
+    local uiSize = IsMobile and UDim2.new(0, 360, 0, 520) or UDim2.new(0, 420, 0, 580)
+    local uiPos = IsMobile and UDim2.new(0.5, -180, 0.5, -260) or UDim2.new(0.5, -210, 0.5, -290)
+
+    frame.Size = uiSize
+    frame.Position = uiPos
     frame.BackgroundColor3 = Color3.fromRGB(15, 15, 20)
-    frame.BorderSizePixel = 0; frame.Active = true; frame.Draggable = true
-    frame.Visible = false; frame.Parent = ScreenGui
-    local uc = Instance.new("UICorner"); uc.CornerRadius = UDim.new(0, 10); uc.Parent = frame
+    frame.BorderSizePixel = 0
+    frame.Active = true
+    frame.Draggable = true
+    frame.Visible = false
+    frame.Parent = ScreenGui
 
+    local uc = Instance.new("UICorner")
+    uc.CornerRadius = UDim.new(0, 10)
+    uc.Parent = frame
+
+    -- 标题栏
     local title = Instance.new("TextLabel")
-    title.Size = UDim2.new(1, 0, 0, 38); title.BackgroundColor3 = Color3.fromRGB(25, 25, 35); title.BorderSizePixel = 0
-    title.Text = "  SCP:异常站点 脚本"
-    title.TextColor3 = Color3.fromRGB(50, 200, 255); title.TextSize = 17; title.Font = Enum.Font.GothamBold
-    title.TextXAlignment = Enum.TextXAlignment.Left; title.Parent = frame
-    local uc2 = Instance.new("UICorner"); uc2.CornerRadius = UDim.new(0, 10); uc2.Parent = title
+    title.Size = UDim2.new(1, 0, 0, 38)
+    title.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    title.BorderSizePixel = 0
+    title.Text = "  SCP异常站点 脚本    作者:B站英吉利超入"
+    title.TextColor3 = Color3.fromRGB(50, 200, 255)
+    title.TextSize = IsMobile and 12 or 15
+    title.Font = Enum.Font.GothamBold
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.Parent = frame
 
+    local uc2 = Instance.new("UICorner")
+    uc2.CornerRadius = UDim.new(0, 10)
+    uc2.Parent = title
+
+    -- 关闭按钮
+    local closeBtn = Instance.new("TextButton")
+    closeBtn.Size = UDim2.new(0, 28, 0, 28)
+    closeBtn.Position = UDim2.new(1, -34, 0, 5)
+    closeBtn.BackgroundColor3 = Color3.fromRGB(60, 30, 30)
+    closeBtn.BorderSizePixel = 0
+    closeBtn.Text = "✕"
+    closeBtn.TextColor3 = Color3.fromRGB(255, 80, 80)
+    closeBtn.TextSize = 16
+    closeBtn.Font = Enum.Font.GothamBold
+    closeBtn.Parent = frame
+
+    local closeCorner = Instance.new("UICorner")
+    closeCorner.CornerRadius = UDim.new(0, 6)
+    closeCorner.Parent = closeBtn
+
+    closeBtn.MouseButton1Click:Connect(function()
+        MenuOpen = false
+        frame.Visible = false
+    end)
+
+    -- 状态栏
     local statusBar = Instance.new("Frame")
-    statusBar.Size = UDim2.new(1, -10, 0, 20); statusBar.Position = UDim2.new(0, 5, 0, 40)
-    statusBar.BackgroundColor3 = Color3.fromRGB(25, 25, 35); statusBar.BorderSizePixel = 0; statusBar.Parent = frame
-    local uc3 = Instance.new("UICorner"); uc3.CornerRadius = UDim.new(0, 4); uc3.Parent = statusBar
+    statusBar.Size = UDim2.new(1, -10, 0, 20)
+    statusBar.Position = UDim2.new(0, 5, 0, 40)
+    statusBar.BackgroundColor3 = Color3.fromRGB(25, 25, 35)
+    statusBar.BorderSizePixel = 0
+    statusBar.Parent = frame
 
-    local statusText = Instance.new("TextLabel")
-    statusText.Size = UDim2.new(1, -10, 1, 0); statusText.Position = UDim2.new(0, 5, 0, 0)
-    statusText.BackgroundTransparency = 1; statusText.Text = "▶ 脚本运行中 | 等待玩家加载..."
-    statusText.TextColor3 = Color3.fromRGB(100, 255, 100); statusText.TextSize = 12; statusText.Font = Enum.Font.Gotham
-    statusText.TextXAlignment = Enum.TextXAlignment.Left; statusText.Parent = statusBar
+    local uc3 = Instance.new("UICorner")
+    uc3.CornerRadius = UDim.new(0, 4)
+    uc3.Parent = statusBar
 
+    StatusText = Instance.new("TextLabel")
+    StatusText.Size = UDim2.new(1, -10, 1, 0)
+    StatusText.Position = UDim2.new(0, 5, 0, 0)
+    StatusText.BackgroundTransparency = 1
+    StatusText.Text = "▶ 运行中 | 等待玩家..."
+    StatusText.TextColor3 = Color3.fromRGB(100, 255, 100)
+    StatusText.TextSize = IsMobile and 10 or 12
+    StatusText.Font = Enum.Font.Gotham
+    StatusText.TextXAlignment = Enum.TextXAlignment.Left
+    StatusText.Parent = statusBar
+
+    -- 滚动区域
     local sf = Instance.new("ScrollingFrame")
-    sf.Size = UDim2.new(1, -10, 1, -70); sf.Position = UDim2.new(0, 5, 0, 63)
-    sf.BackgroundTransparency = 1; sf.BorderSizePixel = 0
-    sf.ScrollBarThickness = 5; sf.AutomaticCanvasSize = Enum.AutomaticSize.Y; sf.Parent = frame
-    local layout = Instance.new("UIListLayout"); layout.Padding = UDim.new(0, 3); layout.Parent = sf
+    sf.Size = UDim2.new(1, -10, 1, -70)
+    sf.Position = UDim2.new(0, 5, 0, 63)
+    sf.BackgroundTransparency = 1
+    sf.BorderSizePixel = 0
+    sf.ScrollBarThickness = IsMobile and 3 or 5
+    sf.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    sf.Parent = frame
 
+    local layout = Instance.new("UIListLayout")
+    layout.Padding = UDim.new(0, 3)
+    layout.Parent = sf
+
+    -- UI辅助函数
     local function CreateSection(text)
         local s = Instance.new("TextLabel")
-        s.Size = UDim2.new(1, -10, 0, 22); s.BackgroundTransparency = 1
-        s.Text = "─── " .. text .. " ───"; s.TextColor3 = Color3.fromRGB(50, 200, 255)
-        s.TextSize = 13; s.Font = Enum.Font.GothamBold; s.Parent = sf
+        s.Size = UDim2.new(1, -10, 0, 22)
+        s.BackgroundTransparency = 1
+        s.Text = "─── " .. text .. " ───"
+        s.TextColor3 = Color3.fromRGB(50, 200, 255)
+        s.TextSize = IsMobile and 12 or 13
+        s.Font = Enum.Font.GothamBold
+        s.Parent = sf
     end
 
     local function CreateRow(text)
         local row = Instance.new("Frame")
-        row.Size = UDim2.new(1, -10, 0, 30); row.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
-        row.BorderSizePixel = 0; row.Parent = sf
-        local ruc = Instance.new("UICorner"); ruc.CornerRadius = UDim.new(0, 5); ruc.Parent = row
+        row.Size = UDim2.new(1, -10, 0, IsMobile and 36 or 30)
+        row.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+        row.BorderSizePixel = 0
+        row.Parent = sf
+        local ruc = Instance.new("UICorner")
+        ruc.CornerRadius = UDim.new(0, 5)
+        ruc.Parent = row
         local label = Instance.new("TextLabel")
-        label.Size = UDim2.new(0.6, -10, 1, 0); label.Position = UDim2.new(0, 10, 0, 0)
-        label.BackgroundTransparency = 1; label.Text = text
-        label.TextColor3 = Color3.fromRGB(220, 220, 220); label.TextSize = 13; label.Font = Enum.Font.Gotham
-        label.TextXAlignment = Enum.TextXAlignment.Left; label.Parent = row
+        label.Size = UDim2.new(0.6, -10, 1, 0)
+        label.Position = UDim2.new(0, 10, 0, 0)
+        label.BackgroundTransparency = 1
+        label.Text = text
+        label.TextColor3 = Color3.fromRGB(220, 220, 220)
+        label.TextSize = IsMobile and 12 or 13
+        label.Font = Enum.Font.Gotham
+        label.TextXAlignment = Enum.TextXAlignment.Left
+        label.Parent = row
         return row, label
     end
 
     local function CreateToggle(cfgPath, text)
         local row, label = CreateRow(text)
         local btn = Instance.new("TextButton")
-        btn.Size = UDim2.new(0, 46, 0, 24)
-        btn.Position = UDim2.new(1, -52, 0.5, -12)
-        btn.BackgroundColor3 = Color3.fromRGB(80, 80, 80); btn.BorderSizePixel = 0
-        btn.Text = "OFF"; btn.TextColor3 = Color3.fromRGB(255, 255, 255); btn.TextSize = 10
-        btn.Font = Enum.Font.GothamBold; btn.Parent = row
-        local buc = Instance.new("UICorner"); buc.CornerRadius = UDim.new(0, 4); buc.Parent = btn
+        btn.Size = UDim2.new(0, IsMobile and 52 or 46, 0, IsMobile and 28 or 24)
+        btn.Position = UDim2.new(1, -58, 0.5, -14)
+        btn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+        btn.BorderSizePixel = 0
+        btn.Text = "OFF"
+        btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+        btn.TextSize = IsMobile and 11 or 10
+        btn.Font = Enum.Font.GothamBold
+        btn.Parent = row
 
+        local buc = Instance.new("UICorner")
+        buc.CornerRadius = UDim.new(0, 4)
+        buc.Parent = btn
+
+        -- 解析配置路径
         local keys = {}
         for k in cfgPath:gmatch("[%w_]+") do table.insert(keys, k) end
+
         local function getCfg()
-            local t = CONFIG; for i = 1, #keys do t = t[keys[i]] end; return t
-        end
-        local function setCfg(v)
-            local t = CONFIG; for i = 1, #keys - 1 do t = t[keys[i]] end; t[keys[#keys]] = v
+            local t = CONFIG
+            for i = 1, #keys do t = t[keys[i]] end
+            return t
         end
 
+        local function setCfg(v)
+            local t = CONFIG
+            for i = 1, #keys - 1 do t = t[keys[i]] end
+            t[keys[#keys]] = v
+        end
+
+        -- 初始状态
         local val = getCfg()
         btn.BackgroundColor3 = val and Color3.fromRGB(50, 200, 100) or Color3.fromRGB(80, 80, 80)
         btn.Text = val and "ON" or "OFF"
@@ -390,27 +656,46 @@ local function CreateUI()
 
     local function CreateSlider(cfgPath, text, minv, maxv, step)
         local row, label = CreateRow(text)
+
         local valLabel = Instance.new("TextLabel")
-        valLabel.Size = UDim2.new(0, 50, 1, 0); valLabel.Position = UDim2.new(1, -105, 0, 0)
-        valLabel.BackgroundTransparency = 1; valLabel.Text = "0"
-        valLabel.TextColor3 = Color3.fromRGB(50, 200, 255); valLabel.TextSize = 13; valLabel.Font = Enum.Font.GothamBold
+        valLabel.Size = UDim2.new(0, 50, 1, 0)
+        valLabel.Position = UDim2.new(1, -110, 0, 0)
+        valLabel.BackgroundTransparency = 1
+        valLabel.Text = "0"
+        valLabel.TextColor3 = Color3.fromRGB(50, 200, 255)
+        valLabel.TextSize = IsMobile and 12 or 13
+        valLabel.Font = Enum.Font.GothamBold
         valLabel.Parent = row
 
         local slider = Instance.new("TextBox")
-        slider.Size = UDim2.new(0, 50, 0, 22)
-        slider.Position = UDim2.new(1, -52, 0.5, -11)
-        slider.BackgroundColor3 = Color3.fromRGB(40, 40, 55); slider.BorderSizePixel = 0
-        slider.Text = "0"; slider.TextColor3 = Color3.fromRGB(255, 255, 255); slider.TextSize = 12
-        slider.Font = Enum.Font.Gotham; slider.ClearTextOnFocus = false; slider.Parent = row
-        local suc = Instance.new("UICorner"); suc.CornerRadius = UDim.new(0, 4); suc.Parent = slider
+        slider.Size = UDim2.new(0, IsMobile and 55 or 50, 0, IsMobile and 26 or 22)
+        slider.Position = UDim2.new(1, -58, 0.5, -13)
+        slider.BackgroundColor3 = Color3.fromRGB(40, 40, 55)
+        slider.BorderSizePixel = 0
+        slider.Text = "0"
+        slider.TextColor3 = Color3.fromRGB(255, 255, 255)
+        slider.TextSize = IsMobile and 12 or 12
+        slider.Font = Enum.Font.Gotham
+        slider.ClearTextOnFocus = false
+        slider.Parent = row
+
+        local suc = Instance.new("UICorner")
+        suc.CornerRadius = UDim.new(0, 4)
+        suc.Parent = slider
 
         local keys = {}
         for k in cfgPath:gmatch("[%w_]+") do table.insert(keys, k) end
+
         local function getCfg()
-            local t = CONFIG; for i = 1, #keys do t = t[keys[i]] end; return t
+            local t = CONFIG
+            for i = 1, #keys do t = t[keys[i]] end
+            return t
         end
+
         local function setCfg(v)
-            local t = CONFIG; for i = 1, #keys - 1 do t = t[keys[i]] end; t[keys[#keys]] = v
+            local t = CONFIG
+            for i = 1, #keys - 1 do t = t[keys[i]] end
+            t[keys[#keys]] = v
         end
 
         local function updateDisplay()
@@ -438,22 +723,25 @@ local function CreateUI()
         end)
     end
 
+    -- 更新状态栏
     local function UpdateStatus()
-        local players = 0; local valid = 0; local pvp = 0
+        local playerCount = 0
+        local validCount = 0
+        local pvpCount = 0
+
         for _, p in ipairs(Players:GetPlayers()) do
             if p == LocalPlayer then continue end
             if p.Character and p.Character:FindFirstChild("HumanoidRootPart") then
-                players = players + 1
-                if p:GetAttribute("InRun") ~= false then valid = valid + 1 end
-                if p:GetAttribute("PVPOff") ~= true then pvp = pvp + 1 end
+                playerCount = playerCount + 1
+                if p:GetAttribute("InRun") ~= false then validCount = validCount + 1 end
+                if p:GetAttribute("PVPOff") ~= true then pvpCount = pvpCount + 1 end
             end
         end
-        statusText.Text = string.format("▶ 运行中 | 玩家:%d 有效:%d PVP开启:%d ESP:%s 自瞄:%s",
-            players, valid, pvp,
-            CONFIG.ESP.Enabled and "✓" or "✗",
-            CONFIG.Aimbot.Enabled and "✓" or "✗")
-    end
 
+        local platform = IsMobile and "📱移动端" or "🖥 PC端"
+        StatusText.Text = string.format("▶ %s | 玩家:%d 有效:%d PVP:%d", platform, playerCount, validCount, pvpCount)
+    end
+-- ====== UI控件生成 ======
     CreateSection("透视 (ESP)")
     CreateToggle("ESP_Enabled", "ESP 总开关")
     CreateToggle("ESP_Box", "方框 (Box)")
@@ -461,33 +749,61 @@ local function CreateUI()
     CreateToggle("ESP_Name", "显示名字")
     CreateToggle("ESP_Distance", "显示距离")
     CreateToggle("ESP_HealthBar", "血量条")
-    CreateToggle("ESP_TeamCheck", "队伍检测(过滤安全玩家)")
+    CreateToggle("ESP_TeamCheck", "队伍检测(过滤安全)")
     CreateSlider("ESP_MaxDistance", "最大显示距离", 50, 1000, 10)
 
     CreateSection("自瞄 (Aimbot)")
     CreateToggle("Aimbot_Enabled", "自瞄 总开关")
-    CreateToggle("Aimbot_TeamCheck", "队伍检测(只瞄PVP开启的)")
-    CreateToggle("Aimbot_VisibleCheck", "可见性检测(Raycast)")
+    CreateToggle("Aimbot_TeamCheck", "队伍检测(只瞄PVP)")
+    CreateToggle("Aimbot_VisibleCheck", "可见性检测")
     CreateToggle("Aimbot_AutoFire", "自动攻击")
     CreateToggle("Aimbot_ShowFOV", "显示FOV圈")
     CreateSlider("Aimbot_FOV", "FOV 范围(像素)", 20, 500, 5)
     CreateSlider("Aimbot_Smoothness", "平滑度(0~1)", 0, 1, 0.05)
     CreateSlider("Aimbot_MaxDistance", "最大瞄准距离", 50, 500, 10)
     CreateSlider("Aimbot_AutoFireRange", "自动攻击距离", 5, 100, 5)
-    CreateSlider("Aimbot_Prediction", "提前量预测(0=关)", 0, 1, 0.05)
+    CreateSlider("Aimbot_Prediction", "提前量预测", 0, 1, 0.05)
+
+    CreateSection("操作说明")
+    local helpText = Instance.new("TextLabel")
+    helpText.Size = UDim2.new(1, -10, 0, IsMobile and 80 or 60)
+    helpText.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    helpText.BorderSizePixel = 0
+    helpText.Text = IsMobile and
+        "📱 移动端操作:\n• 点击屏幕⚙按钮开关菜单\n• 触摸屏幕任意位置开启自瞄\n• 手指移动时FOV跟随\n• 松手停止自瞄" or
+        "🖥 PC端操作:\n• RightShift 开关菜单\n• 按住鼠标右键开启自瞄\n• FOV圆圈跟随鼠标"
+    helpText.TextColor3 = Color3.fromRGB(180, 180, 180)
+    helpText.TextSize = IsMobile and 11 or 12
+    helpText.Font = Enum.Font.Gotham
+    helpText.TextXAlignment = Enum.TextXAlignment.Left
+    helpText.TextYAlignment = Enum.TextYAlignment.Top
+    helpText.Parent = sf
+
+    local huc = Instance.new("UICorner")
+    huc.CornerRadius = UDim.new(0, 5)
+    huc.Parent = helpText
 
     CreateSection("调试信息")
-    local debugText = Instance.new("TextLabel")
-    debugText.Size = UDim2.new(1, -10, 0, 80)
-    debugText.BackgroundColor3 = Color3.fromRGB(20, 20, 30); debugText.BorderSizePixel = 0
-    debugText.Text = "等待数据..." .. string.rep("\n", 4)
-    debugText.TextColor3 = Color3.fromRGB(180, 180, 180); debugText.TextSize = 11
-    debugText.Font = Enum.Font.Gotham; debugText.TextXAlignment = Enum.TextXAlignment.Left
-    debugText.TextYAlignment = Enum.TextYAlignment.Top; debugText.Parent = sf
-    local duc = Instance.new("UICorner"); duc.CornerRadius = UDim.new(0, 5); duc.Parent = debugText
+    DebugText = Instance.new("TextLabel")
+    DebugText.Size = UDim2.new(1, -10, 0, 80)
+    DebugText.BackgroundColor3 = Color3.fromRGB(20, 20, 30)
+    DebugText.BorderSizePixel = 0
+    DebugText.Text = "等待数据..." .. string.rep("\n", 4)
+    DebugText.TextColor3 = Color3.fromRGB(180, 180, 180)
+    DebugText.TextSize = IsMobile and 10 or 11
+    DebugText.Font = Enum.Font.Gotham
+    DebugText.TextXAlignment = Enum.TextXAlignment.Left
+    DebugText.TextYAlignment = Enum.TextYAlignment.Top
+    DebugText.Parent = sf
 
+    local duc = Instance.new("UICorner")
+    duc.CornerRadius = UDim.new(0, 5)
+    duc.Parent = DebugText
+
+    -- 状态和调试信息更新循环
     RunService.RenderStepped:Connect(function()
         UpdateStatus()
+
         local targetInfo = "无目标"
         if Aimbot.Target then
             local dist = 0
@@ -496,80 +812,169 @@ local function CreateUI()
                 local mr = LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
                 if tr and mr then dist = (tr.Position - mr.Position).Magnitude end
             end
-            targetInfo = string.format("%s (%.0f studs)", Aimbot.Target.Name, dist)
+            targetInfo = string.format("%s (%.0f)", Aimbot.Target.Name, dist)
         end
-        debugText.Text = string.format(
-            [[[目标]: %s
-[自瞄键]: %s | [状态]: %s
-[FOV]: %dpx | [平滑]: %.2f | [预测]: %.2f
-[自动攻击]: %s | [攻击距离]: %d
-[队伍检测ESP]: %s | [队伍检测自瞄]: %s]],
-            targetInfo,
-            CONFIG.Aimbot.KeyBind, Aimbot.Target and "锁定中" or "等待中",
-            CONFIG.Aimbot.FOV, CONFIG.Aimbot.Smoothness, CONFIG.Aimbot.Prediction,
-            CONFIG.Aimbot.AutoFire and "开启" or "关闭", CONFIG.Aimbot.AutoFireRange,
-            CONFIG.ESP.TeamCheck and "开启" or "关闭",
-            CONFIG.Aimbot.TeamCheck and "开启" or "关闭"
+
+        local mode = IsMobile and "触摸" or "右键"
+        local aimState = Aimbot.Target and "锁定中" or "等待中"
+
+        DebugText.Text = string.format(
+            "[目标]: %s\n[模式]: %s | [状态]: %s\n[FOV]: %dpx | [平滑]: %.2f\n[预测]: %.2f | [自动攻击]: %s\n[队伍ESP]: %s | [队伍自瞄]: %s",
+            targetInfo, mode, aimState,
+            CONFIG.Aimbot.FOV, CONFIG.Aimbot.Smoothness,
+            CONFIG.Aimbot.Prediction, CONFIG.Aimbot.AutoFire and "开" or "关",
+            CONFIG.ESP.TeamCheck and "开" or "关",
+            CONFIG.Aimbot.TeamCheck and "开" or "关"
         )
     end)
 
     return frame
 end
 
--- ==================== 核心逻辑 ====================
-local function Init()
-    local pg = LocalPlayer:WaitForChild("PlayerGui")
-    ScreenGui.Parent = pg
-    local frame = CreateUI()
+-- ==================== 清理函数 ====================
+local function CleanupAll()
+    -- 清理所有Drawing
+    for _, d in pairs(ESP_Objects) do
+        for _, obj in pairs(d) do
+            pcall(function() obj:Remove() end)
+        end
+    end
+    ESP_Objects = {}
 
-    for _, plr in ipairs(Players:GetPlayers()) do
-        CreateESP(plr)
-        plr.CharacterAdded:Connect(function() task.wait(0.5); CreateESP(plr) end)
+    -- 清理FOV圆圈
+    pcall(function() FOVCircle:Remove() end)
+
+    -- 清理移动端按钮
+    if MenuToggleBtn then
+        pcall(function() MenuToggleBtn:Destroy() end)
+        MenuToggleBtn = nil
     end
 
-    Players.PlayerAdded:Connect(function(plr)
-        CreateESP(plr)
-        plr.CharacterAdded:Connect(function() task.wait(0.5); CreateESP(plr) end)
-    end)
-    Players.PlayerRemoving:Connect(RemoveESP)
+    -- 断开移动端触摸连接
+    for _, conn in ipairs(MobileTouchConnections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    MobileTouchConnections = {}
 
-    UserInputService.InputBegan:Connect(function(input, gp)
-        if gp then return end
-        if input.KeyCode == CONFIG.UI.ToggleKey then
-            MenuOpen = not MenuOpen; frame.Visible = MenuOpen
-            Log(string.format("菜单 %s", MenuOpen and "打开" or "关闭"))
-        end
-    end)
+    -- 清理ScreenGui
+    if ScreenGui then
+        pcall(function() ScreenGui:Destroy() end)
+    end
 
-    Log("脚本已启动! RightShift=菜单 | 按住右键自瞄", "OK")
+    -- 清理连接表
+    for _, conn in ipairs(ESP_Connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    ESP_Connections = {}
+
+    Log("所有资源已清理", "INFO")
 end
 
--- ==================== 主循环 ====================
-Init()
+-- ==================== 核心逻辑 ====================
+local function Init()
+    -- 等待PlayerGui可用
+    local pg = LocalPlayer:WaitForChild("PlayerGui")
 
-RunService.RenderStepped:Connect(function()
-    UpdateFOV()
+    -- 将ScreenGui放入PlayerGui
+    ScreenGui.Parent = pg
 
-    if CONFIG.ESP.Enabled then
-        pcall(UpdateESP)
-    else
-        for _, d in pairs(ESP_Objects) do
-            for _, o in pairs(d) do o.Visible = false end
-        end
+    -- 创建UI菜单
+    local frame = CreateUI()
+
+    -- 初始化已有玩家的ESP
+    for _, plr in ipairs(Players:GetPlayers()) do
+        CreateESP(plr)
     end
 
+    -- 监听玩家加入
+    local connAdd = Players.PlayerAdded:Connect(function(plr)
+        CreateESP(plr)
+        -- 角色重生时重建ESP
+        local connChar = plr.CharacterAdded:Connect(function()
+            task.wait(0.5)
+            CreateESP(plr)
+        end)
+        table.insert(ESP_Connections, connChar)
+    end)
+    table.insert(ESP_Connections, connAdd)
+
+    -- 监听玩家离开
+    local connRemove = Players.PlayerRemoving:Connect(RemoveESP)
+    table.insert(ESP_Connections, connRemove)
+
+    -- 本地角色重生时：不清理ESP，等待其他玩家角色重生
+    local connRespawn = LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(1)
+        -- 重新创建所有玩家ESP（因为他们的角色可能变了）
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                CreateESP(plr)
+            end
+        end
+    end)
+    table.insert(ESP_Connections, connRespawn)
+
+    -- Camera切换时更新引用（无需操作，因为GetCamera()动态获取）
+
+    -- 移动端设置
+    if IsMobile then
+        SetupMobileControls()
+    end
+
+    -- PC端键盘菜单开关
+    if IsPC then
+        local connKey = UserInputService.InputBegan:Connect(function(input, gp)
+            if gp then return end
+            if input.KeyCode == CONFIG.UI.ToggleKey then
+                MenuOpen = not MenuOpen
+                frame.Visible = MenuOpen
+                Log(string.format("菜单 %s", MenuOpen and "打开" or "关闭"))
+            end
+        end)
+        table.insert(ESP_Connections, connKey)
+    end
+
+    Log(string.format("脚本已启动! [%s] | 作者:B站英吉利超入", IsMobile and "移动端" or "PC端"), "OK")
+end
+
+-- ==================== 启动 ====================
+Init()
+
+-- ==================== 主循环 ====================
+RunService.RenderStepped:Connect(function()
+    -- 更新FOV
+    UpdateFOV()
+
+    -- 更新ESP
+    if CONFIG.ESP.Enabled then
+        local success, err = pcall(UpdateESP)
+        if not success then
+            -- 只在有实际错误时输出（避免刷屏）
+            -- 通常是因为Camera为nil或角色未加载，属于正常情况
+        end
+    else
+        HideAllESP()
+    end
+
+    -- 自瞄逻辑
     if CONFIG.Aimbot.Enabled then
-        local isDown = false
-        if CONFIG.Aimbot.KeyBind == "MouseButton2" then
-            isDown = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-        elseif CONFIG.Aimbot.KeyBind == "MouseButton1" then
-            isDown = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+        local isActive = false
+
+        if IsMobile then
+            -- ★修复：确保菜单打开时触摸不会触发自瞄
+            isActive = TouchAimActive and not MenuOpen
         else
-            local k = Enum.KeyCode[CONFIG.Aimbot.KeyBind]
-            if k then isDown = UserInputService:IsKeyDown(k) end
+            if CONFIG.Aimbot.KeyBind == "MouseButton2" then
+                isActive = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+            elseif CONFIG.Aimbot.KeyBind == "MouseButton1" then
+                isActive = UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton1)
+            else
+                local k = Enum.KeyCode[CONFIG.Aimbot.KeyBind]
+                if k then isActive = UserInputService:IsKeyDown(k) end
+            end
         end
 
-        if isDown then
+        if isActive then
             local target, targetPart = FindTarget()
             if target then
                 Aimbot.Target = target
@@ -584,14 +989,20 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
--- ==================== 清理 ====================
-LocalPlayer.OnTeleport:Connect(function(state)
-    if state == TeleportState.Leaving then
-        for _, d in pairs(ESP_Objects) do
-            for _, o in pairs(d) do pcall(function() o:Remove() end) end
-        end
-        FOVCircle:Remove()
-        pcall(function() ScreenGui:Destroy() end)
-        Log("脚本已清理", "INFO")
+-- ==================== 传送/离开清理 ====================
+local function OnTeleporting(state)
+    if state == Enum.TeleportState.Leaving then
+        CleanupAll()
     end
+end
+
+local teleportConn
+teleportConn = LocalPlayer.OnTeleport:Connect(OnTeleporting)
+table.insert(ESP_Connections, teleportConn)
+
+-- 保护
+local connCharRemoving = LocalPlayer.CharacterRemoving:Connect(function()
+    -- 不直接清理，只是隐藏所有ESP
+    HideAllESP()
 end)
+table.insert(ESP_Connections, connCharRemoving)
