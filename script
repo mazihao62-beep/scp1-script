@@ -3,12 +3,10 @@
 
 local CONFIG = {
     ESP = { Enabled = false, Box = true, Line = true, Name = true, Distance = true,
-            HealthBar = true, TracerOrigin = "Bottom", MaxDistance = 500,
-            TeamCheck = true, Color = Color3.fromRGB(255, 50, 50),
-            TeamColor = Color3.fromRGB(50, 255, 50) },
-    Aimbot = { Enabled = false, Smoothness = 0.6, MaxDistance = 250, FOV = 120,
-               ShowFOV = true, AimAt = "Head", TeamCheck = true,
-               VisibleCheck = false, AutoFire = false, AutoFireRange = 30, Prediction = 0 },
+            HealthBar = true, TeamName = true, TracerOrigin = "Bottom", MaxDistance = 500,
+            TeamCheck = true, Color = Color3.fromRGB(255, 50, 50) },
+    Aimbot = { Enabled = false, FOV = 120, ShowFOV = true, AimAt = "Head",
+               TeamCheck = true, WallCheck = true, MaxDistance = 250, Smoothness = 0.6, Prediction = 0 },
 }
 
 local Players = game:GetService("Players")
@@ -18,13 +16,33 @@ local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
-
 local IsMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
-local Aimbot = { Target = nil, TargetPart = nil, TouchPos = nil }
 
+local Aimbot = { Target = nil, TargetPart = nil }
 local ESP_Objects = {}
 local ESP_Connections = {}
 local MobileTouchCons = {}
+
+-- 队伍翻译
+local TeamNames = {
+    ["SCP"] = "SCP", ["MTF"] = "MTF", ["Chaos Insurgency"] = "混沌分裂者",
+    ["Class D"] = "D级人员", ["Scientists"] = "科学家", ["Spectator"] = "旁观者",
+    ["Foundation"] = "基金会", ["UIU"] = "UIU", ["GOC"] = "GOC",
+    ["Serpent's Hand"] = "蛇之手", ["Church of the Broken God"] = "破碎之神教会",
+    ["Anderson Robotics"] = "安德森机器人", ["Marshall, Carter & Dark"] = "MCD",
+    ["The Factory"] = "工厂", ["Gamemasters"] = "管理员",
+}
+
+local function GetTeamName(plr)
+    local team = plr.Team
+    if not team then return "无队伍" end
+    return TeamNames[team.Name] or team.Name
+end
+
+local function GetTeamColor(plr)
+    local team = plr.Team
+    return team and team.TeamColor.Color or Color3.fromRGB(180, 180, 180)
+end
 
 local function Log(m, l)
     l = l or "INFO"
@@ -32,7 +50,6 @@ local function Log(m, l)
     print(t, m)
 end
 
--- ★修复: 只有 InRun == false 才跳过，nil（未设置）也视为有效
 local function IsValid(plr)
     if plr == LocalPlayer then return false end
     if not plr.Character then return false end
@@ -40,23 +57,34 @@ local function IsValid(plr)
     if not root then return false end
     local hum = plr.Character:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return false end
-    -- 只有明确为false才跳过（对应游戏中的"不在副本中"）
     if plr:GetAttribute("InRun") == false then return false end
     return true
 end
 
-local function IsPvP(plr) return plr:GetAttribute("PVPOff") ~= true end
+local function IsSameTeam(plr)
+    if not plr.Team or not LocalPlayer.Team then return false end
+    return plr.Team == LocalPlayer.Team
+end
 
 local function ShouldESP(plr)
     if not IsValid(plr) then return false end
-    if CONFIG.ESP.TeamCheck then return IsPvP(plr) end
+    if CONFIG.ESP.TeamCheck and IsSameTeam(plr) then return false end
     return true
 end
 
-local function ShouldAim(plr)
+local function ShouldAimbot(plr)
     if not IsValid(plr) then return false end
-    if CONFIG.Aimbot.TeamCheck then return IsPvP(plr) end
+    if CONFIG.Aimbot.TeamCheck and IsSameTeam(plr) then return false end
     return true
+end
+
+local function IsVisible(from, to)
+    if not CONFIG.Aimbot.WallCheck then return true end
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Blacklist
+    params.FilterDescendantsInstances = {LocalPlayer.Character, Workspace.CurrentCamera}
+    local result = Workspace:Raycast(from, (to - from).Unit * (to - from).Magnitude, params)
+    return not result
 end
 
 local function GetPart(char, name)
@@ -83,8 +111,11 @@ local function UpdFOV()
     FOVC.Visible = CONFIG.Aimbot.ShowFOV
     if not FOVC.Visible then return end
     FOVC.Radius = CONFIG.Aimbot.FOV
-    if IsMobile then FOVC.Position = Aimbot.TouchPos or cam.ViewportSize / 2
-    else FOVC.Position = UserInputService:GetMouseLocation() end
+    if IsMobile then
+        FOVC.Position = cam.ViewportSize / 2
+    else
+        FOVC.Position = UserInputService:GetMouseLocation()
+    end
 end
 
 -- ESP
@@ -98,8 +129,9 @@ local function MkESP(plr)
     end
     mk("Box", "Square", { Thickness = 1, Filled = false })
     mk("Line", "Line", { Thickness = 1 })
-    mk("Name", "Text", { Center = true, Outline = true, Size = IsMobile and 12 or 14 })
-    mk("Dist", "Text", { Center = true, Outline = true, Size = IsMobile and 10 or 12 })
+    mk("Name", "Text", { Center = true, Outline = true, Size = 14 })
+    mk("Team", "Text", { Center = true, Outline = true, Size = 12 })
+    mk("Dist", "Text", { Center = true, Outline = true, Size = 12 })
     mk("HbBg", "Square", { Thickness = 0, Filled = true, Color = Color3.fromRGB(30, 30, 30) })
     mk("Hb", "Square", { Thickness = 0, Filled = true })
     ESP_Objects[plr] = d
@@ -124,57 +156,51 @@ local function UpdESP()
     for plr, d in pairs(ESP_Objects) do
         if not d then continue end
         if not ShouldESP(plr) then
-            for _, o in pairs(d) do pcall(function() o.Visible = false end) end
-            continue
+            for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue
         end
         local c = plr.Character; local r = c and c:FindFirstChild("HumanoidRootPart")
         local h = c and c:FindFirstChild("Head"); local hm = c and c:FindFirstChildOfClass("Humanoid")
         if not r or not h or not hm then
-            for _, o in pairs(d) do pcall(function() o.Visible = false end) end
-            continue
+            for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue
         end
         local dist = (r.Position - mr.Position).Magnitude
         if dist > CONFIG.ESP.MaxDistance then
-            for _, o in pairs(d) do pcall(function() o.Visible = false end) end
-            continue
+            for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue
         end
-
-        -- 安全获取屏幕坐标
-        local hp, oh = nil, false
-        local rp, or_ = nil, false
+        local hp, oh = nil, false; local rp, or_ = nil, false
         pcall(function() hp, oh = cam:WorldToViewportPoint(h.Position + Vector3.new(0, 0.5, 0)) end)
         pcall(function() rp, or_ = cam:WorldToViewportPoint(r.Position - Vector3.new(0, 0.2, 0)) end)
         if not hp or not rp or (not oh and not or_) then
-            for _, o in pairs(d) do pcall(function() o.Visible = false end) end
-            continue
+            for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue
         end
-
-        local pvp = IsPvP(plr)
-        local col = (CONFIG.ESP.TeamCheck and not pvp) and CONFIG.ESP.TeamColor or CONFIG.ESP.Color
+        local tcol = GetTeamColor(plr)
         local bh = math.abs(hp.Y - rp.Y); local bw = math.max(bh * 0.65, 4)
         local bx = rp.X - bw / 2; local by = rp.Y
 
         if d.Box then pcall(function()
             d.Box.Size = Vector2.new(bw, math.max(bh, 4)); d.Box.Position = Vector2.new(bx, by - bh)
-            d.Box.Color = col; d.Box.Visible = CONFIG.ESP.Box
+            d.Box.Color = tcol; d.Box.Visible = CONFIG.ESP.Box
         end) end
         if d.Line then pcall(function()
             local ss = cam.ViewportSize; local ox, oy
             if CONFIG.ESP.TracerOrigin == "Middle" then ox, oy = ss.X/2, ss.Y/2
             elseif CONFIG.ESP.TracerOrigin == "Mouse" then
-                if IsMobile and Aimbot.TouchPos then ox, oy = Aimbot.TouchPos.X, Aimbot.TouchPos.Y
-                elseif not IsMobile then local m = UserInputService:GetMouseLocation(); ox, oy = m.X, m.Y
+                if not IsMobile then local m = UserInputService:GetMouseLocation(); ox, oy = m.X, m.Y
                 else ox, oy = ss.X/2, ss.Y end
             else ox, oy = ss.X/2, ss.Y end
             d.Line.From = Vector2.new(ox, oy); d.Line.To = Vector2.new(rp.X, rp.Y)
-            d.Line.Color = col; d.Line.Visible = CONFIG.ESP.Line
+            d.Line.Color = tcol; d.Line.Visible = CONFIG.ESP.Line
         end) end
         if d.Name then pcall(function()
-            d.Name.Text = plr.Name; d.Name.Position = Vector2.new(rp.X, by - bh - 18)
-            d.Name.Color = col; d.Name.Visible = CONFIG.ESP.Name
+            d.Name.Text = plr.Name; d.Name.Position = Vector2.new(rp.X, by - bh - 30)
+            d.Name.Color = CONFIG.ESP.Color; d.Name.Visible = CONFIG.ESP.Name
+        end) end
+        if d.Team then pcall(function()
+            d.Team.Text = GetTeamName(plr); d.Team.Position = Vector2.new(rp.X, by - bh - 16)
+            d.Team.Color = tcol; d.Team.Visible = CONFIG.ESP.TeamName
         end) end
         if d.Dist then pcall(function()
-            d.Dist.Text = string.format("%.0f [%s]", dist, pvp and "⚔" or "✓")
+            d.Dist.Text = string.format("%.0f studs", dist)
             d.Dist.Position = Vector2.new(rp.X, by + 2); d.Dist.Color = Color3.fromRGB(200,200,200)
             d.Dist.Visible = CONFIG.ESP.Distance
         end) end
@@ -189,16 +215,38 @@ local function UpdESP()
         end) end
     end
 end
--- ===== 自瞄 + 子弹追踪 =====
+-- ===== 自瞄+静默瞄准（合并，共用参数） =====
+-- 自瞄：自动转向最近敌人
+-- 静默：手动攻击时强制命中目标
+-- 不自动攻击
+
 local function FindTarget()
     local cam = Workspace.CurrentCamera
     if not cam then return nil, nil end
     local closest = CONFIG.Aimbot.FOV; local cp, cpart = nil, nil
-    local center = (IsMobile and Aimbot.TouchPos) or UserInputService:GetMouseLocation()
+    local center
+    if IsMobile then
+        center = cam.ViewportSize / 2
+    else
+        center = UserInputService:GetMouseLocation()
+    end
+
+    local myChar = LocalPlayer.Character
+    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
+    if not myRoot then return nil, nil end
+
     for _, plr in ipairs(Players:GetPlayers()) do
-        if not ShouldAim(plr) then continue end
+        if not ShouldAimbot(plr) then continue end
         local tp = GetPart(plr.Character, CONFIG.Aimbot.AimAt)
         if not tp then continue end
+        local tr = plr.Character:FindFirstChild("HumanoidRootPart")
+        if tr then
+            local d = (myRoot.Position - tr.Position).Magnitude
+            if d > CONFIG.Aimbot.MaxDistance then continue end
+        end
+        if CONFIG.Aimbot.WallCheck and tr then
+            if not IsVisible(myRoot.Position, tr.Position) then continue end
+        end
         local pos, on = nil, false
         pcall(function() pos, on = cam:WorldToViewportPoint(tp.Position) end)
         if not pos or not on then continue end
@@ -208,6 +256,7 @@ local function FindTarget()
     return cp, cpart
 end
 
+-- 自瞄转向
 local function AimAt(tg, tp)
     if not tg or not tp then return end
     local mc = LocalPlayer.Character; if not mc then return end
@@ -227,47 +276,80 @@ local function AimAt(tg, tp)
     end
 end
 
-local lastAttackTime = 0
-local function BulletTrack(tg)
-    if not CONFIG.Aimbot.AutoFire or not tg or not tg.Character then return end
-    local mc = LocalPlayer.Character; if not mc then return end
-    local mr = mc:FindFirstChild("HumanoidRootPart")
-    local tr = tg.Character:FindFirstChild("HumanoidRootPart")
-    if not mr or not tr then return end
-    local dist = (mr.Position - tr.Position).Magnitude
-    if dist > CONFIG.Aimbot.AutoFireRange then return end
-
-    local now = tick()
-    if now - lastAttackTime < 0.3 then return end
-    lastAttackTime = now
-
-    local function DoAttack(tool)
-        if not tool or not tool:IsA("Tool") then return false end
-        if tool.Parent ~= mc then
-            local ok = pcall(function() tool.Parent = mc end)
-            if not ok then return false end
-            task.wait()
-        end
-        if tool.Parent == mc then
-            pcall(function() tool:Activate() end)
-            return true
-        end
-        return false
-    end
-
-    local eq = mc:FindFirstChildOfClass("Tool")
-    if eq then DoAttack(eq); return end
-
-    local bp = LocalPlayer:FindFirstChild("Backpack")
-    if bp then
-        for _, t in ipairs(bp:GetChildren()) do
-            if DoAttack(t) then break end
+-- 静默命中：用户攻击时强制命中目标
+local function SilentHit(tg, tp)
+    if not tg or not tp then return end
+    local mc = LocalPlayer.Character
+    if not mc then return end
+    local tool = mc:FindFirstChildOfClass("Tool")
+    if not tool then
+        local bp = LocalPlayer:FindFirstChild("Backpack")
+        if bp then
+            for _, t in ipairs(bp:GetChildren()) do
+                if t:IsA("Tool") then
+                    pcall(function() t.Parent = mc end)
+                    task.wait()
+                    tool = t; break
+                end
+            end
         end
     end
+    if not tool then return end
+    local hitEvent = tool:FindFirstChild("WeaponHitEvent")
+    if not hitEvent then
+        for _, child in ipairs(tool:GetDescendants()) do
+            if child:IsA("RemoteEvent") and child.Name:find("Hit") then
+                hitEvent = child; break
+            end
+        end
+    end
+    if not hitEvent then return end
+    pcall(function() hitEvent:FireServer(tp) end)
 end
 
--- ===== 移动端触摸 =====
-local TouchActive = false
+-- 监听用户攻击输入
+local function OnUserAttack()
+    if not CONFIG.Aimbot.Enabled then return end
+    if not Aimbot.Target or not Aimbot.TargetPart then return end
+    SilentHit(Aimbot.Target, Aimbot.TargetPart)
+end
+
+-- PC端：鼠标左键
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.UserInputType == Enum.UserInputType.MouseButton1 then
+        OnUserAttack()
+    end
+    if input.KeyCode == Enum.KeyCode.E then
+        OnUserAttack()
+    end
+end)
+
+-- 移动端：区分点击(tap)和滑动(drag)
+local touchStartPos = nil
+local touchStartTime = nil
+local TAP_DISTANCE = 30
+local TAP_TIME = 0.3
+
+UserInputService.TouchStarted:Connect(function(t, gp)
+    if gp then return end
+    touchStartPos = t.Position
+    touchStartTime = tick()
+end)
+
+UserInputService.TouchEnded:Connect(function(t, gp)
+    if gp then return end
+    if not touchStartPos or not touchStartTime then return end
+    local dist = (t.Position - touchStartPos).Magnitude
+    local duration = tick() - touchStartTime
+    if dist < TAP_DISTANCE and duration < TAP_TIME then
+        OnUserAttack()
+    end
+    touchStartPos = nil
+    touchStartTime = nil
+end)
+
+-- ===== 移动端触摸（仅菜单开关） =====
 local MenuBtn = nil
 
 local function SetupMobile()
@@ -284,22 +366,8 @@ local function SetupMobile()
 
     MenuBtn.MouseButton1Click:Connect(function()
         local sg = CoreGui:FindFirstChild("MyScriptUI")
-        if sg then
-            local m = sg:FindFirstChild("MainFrame"); local f = sg:FindFirstChild("FloatFrame")
-            if m then local v = not m.Visible; m.Visible = v; if f then f.Visible = not v end end
-        end
-    end)
-
-    UserInputService.TouchStarted:Connect(function(t, gp)
-        if gp then return end
-        local sg = CoreGui:FindFirstChild("MyScriptUI")
-        if sg then local m = sg:FindFirstChild("MainFrame"); if m and m.Visible then return end end
-        Aimbot.TouchPos = t.Position
-        task.delay(0.05, function() if Aimbot.TouchPos then TouchActive = true end end)
-    end)
-    UserInputService.TouchMoved:Connect(function(t) if Aimbot.TouchPos then Aimbot.TouchPos = t.Position end end)
-    UserInputService.TouchEnded:Connect(function()
-        TouchActive = false; Aimbot.TouchPos = nil; Aimbot.Target = nil; Aimbot.TargetPart = nil
+        if sg then local m = sg:FindFirstChild("MainFrame"); local f = sg:FindFirstChild("FloatFrame")
+            if m then local v = not m.Visible; m.Visible = v; if f then f.Visible = not v end end end
     end)
 end
 
@@ -331,7 +399,7 @@ local function CreateUI()
     sg.Name = "MyScriptUI"; sg.ResetOnSpawn = false; sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; sg.Parent = CoreGui
 
     local mf = Instance.new("Frame"); mf.Name = "MainFrame"
-    mf.Size = UDim2.new(0, 300, 0, 370); mf.Position = UDim2.new(0.5, -150, 0.4, -185)
+    mf.Size = UDim2.new(0, 300, 0, 380); mf.Position = UDim2.new(0.5, -150, 0.4, -190)
     mf.BackgroundColor3 = Color3.fromRGB(25,25,25); mf.BackgroundTransparency = 0.05
     mf.BorderSizePixel = 0; mf.Active = true; mf.Draggable = true; mf.Parent = sg
     Instance.new("UICorner", mf).CornerRadius = UDim.new(0, 10)
@@ -377,40 +445,44 @@ local function CreateUI()
         return {G=function() return tonumber(inp.Text) or def end, S=function(v) inp.Text=tostring(v); lb.Text=title..": "..v end, I=inp}
     end
 
-    -- 所有功能默认关闭
-    local espBt = MkBtn("ESP 透视（关闭）", false)
+    -- ESP
+    local espBt = MkBtn("ESP透视（关闭）", false)
     espBt.MouseButton1Click:Connect(function()
         CONFIG.ESP.Enabled = not CONFIG.ESP.Enabled; local s = CONFIG.ESP.Enabled
-        espBt.Text = s and "ESP 透视（开启）" or "ESP 透视（关闭）"
+        espBt.Text = s and "ESP透视（开启）" or "ESP透视（关闭）"
         espBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    local aimBt = MkBtn("自瞄（关闭）", false)
+    -- 队伍检测（ESP和瞄准共用）
+    local tmBt = MkBtn("队伍检测（开启）", true)
+    tmBt.MouseButton1Click:Connect(function()
+        CONFIG.ESP.TeamCheck = not CONFIG.ESP.TeamCheck; CONFIG.Aimbot.TeamCheck = CONFIG.ESP.TeamCheck
+        local s = CONFIG.ESP.TeamCheck; tmBt.Text = s and "队伍检测（开启）" or "队伍检测（关闭）"
+        tmBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+    end)
+
+    -- 瞄准系统（自瞄转向 + 静默命中，共用参数）
+    local aimBt = MkBtn("瞄准系统（关闭）", false)
     aimBt.MouseButton1Click:Connect(function()
         CONFIG.Aimbot.Enabled = not CONFIG.Aimbot.Enabled; local s = CONFIG.Aimbot.Enabled
-        aimBt.Text = s and "自瞄（开启）" or "自瞄（关闭）"
+        aimBt.Text = s and "瞄准系统（开启）" or "瞄准系统（关闭）"
         aimBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    local btBt = MkBtn("子弹追踪（关闭）", false)
-    btBt.MouseButton1Click:Connect(function()
-        CONFIG.Aimbot.AutoFire = not CONFIG.Aimbot.AutoFire; local s = CONFIG.Aimbot.AutoFire
-        btBt.Text = s and "子弹追踪（开启）" or "子弹追踪（关闭）"
-        btBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+    -- 墙壁检测
+    local wallBt = MkBtn("墙壁检测（关闭）", false)
+    wallBt.MouseButton1Click:Connect(function()
+        CONFIG.Aimbot.WallCheck = not CONFIG.Aimbot.WallCheck; local s = CONFIG.Aimbot.WallCheck
+        wallBt.Text = s and "墙壁检测（开启）" or "墙壁检测（关闭）"
+        wallBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
+    -- FOV
     local fovBt = MkBtn("FOV圆圈（显示）", true)
     fovBt.MouseButton1Click:Connect(function()
         CONFIG.Aimbot.ShowFOV = not CONFIG.Aimbot.ShowFOV; local s = CONFIG.Aimbot.ShowFOV
         fovBt.Text = s and "FOV圆圈（显示）" or "FOV圆圈（隐藏）"
         fovBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
-    end)
-
-    local tmBt = MkBtn("队伍检测（开启）", true)
-    tmBt.MouseButton1Click:Connect(function()
-        CONFIG.Aimbot.TeamCheck = not CONFIG.Aimbot.TeamCheck; CONFIG.ESP.TeamCheck = CONFIG.Aimbot.TeamCheck
-        local s = CONFIG.Aimbot.TeamCheck; tmBt.Text = s and "队伍检测（开启）" or "队伍检测（关闭）"
-        tmBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
     local fovSl = MkSlider("FOV范围", 20, 500, CONFIG.Aimbot.FOV)
@@ -425,13 +497,13 @@ local function CreateUI()
             CONFIG.Aimbot.Smoothness = v; smSl.S(v) end
     end)
 
-    local atSl = MkSlider("攻击距离", 5, 100, CONFIG.Aimbot.AutoFireRange)
+    local atSl = MkSlider("最大距离", 50, 500, CONFIG.Aimbot.MaxDistance)
     atSl.I.FocusLost:Connect(function(e)
-        if e then local v = math.clamp(tonumber(atSl.I.Text) or CONFIG.Aimbot.AutoFireRange, 5, 100)
-            CONFIG.Aimbot.AutoFireRange = v; atSl.S(v) end
+        if e then local v = math.clamp(tonumber(atSl.I.Text) or CONFIG.Aimbot.MaxDistance, 50, 500)
+            CONFIG.Aimbot.MaxDistance = v; atSl.S(v) end
     end)
 
-    -- 悬浮窗 (TextButton有MouseButton1Click)
+    -- 悬浮窗
     local ff = Instance.new("TextButton", sg); ff.Name = "FloatFrame"
     ff.Size = UDim2.new(0, 200, 0, 30); ff.Position = UDim2.new(0.5, -100, 0, 10)
     ff.BackgroundColor3 = Color3.fromRGB(35,35,35); ff.BackgroundTransparency = 0.1
@@ -495,29 +567,21 @@ end
 
 Init()
 
--- 主循环
+-- ===== 主循环 =====
 RunService.RenderStepped:Connect(function()
     pcall(UpdFOV)
+    if CONFIG.ESP.Enabled then pcall(UpdESP) else pcall(HideESP) end
 
-    if CONFIG.ESP.Enabled then
-        pcall(UpdESP)
-    else
-        pcall(HideESP)
-    end
-
+    -- 瞄准系统：自瞄转向 + 静默命中
     if CONFIG.Aimbot.Enabled then
-        local active = IsMobile and TouchActive or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-        if active then
-            local t, tp = FindTarget()
-            if t then
-                Aimbot.Target = t; Aimbot.TargetPart = tp
-                AimAt(t, tp)
-                BulletTrack(t)
-            else
-                Aimbot.Target = nil; Aimbot.TargetPart = nil
-            end
+        local t, tp = FindTarget()
+        if t then
+            Aimbot.Target = t; Aimbot.TargetPart = tp
+            AimAt(t, tp)
         else
             Aimbot.Target = nil; Aimbot.TargetPart = nil
         end
+    else
+        Aimbot.Target = nil; Aimbot.TargetPart = nil
     end
 end)
