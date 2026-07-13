@@ -6,10 +6,9 @@ local CONFIG = {
             HealthBar = true, TracerOrigin = "Bottom", MaxDistance = 500,
             TeamCheck = true, Color = Color3.fromRGB(255, 50, 50),
             TeamColor = Color3.fromRGB(50, 255, 50) },
-    Aimbot = { Enabled = true, Smoothness = 0.6,
-               MaxDistance = 250, FOV = 120, ShowFOV = true, AimAt = "Head",
-               TeamCheck = true, VisibleCheck = false, AutoFire = false,
-               AutoFireRange = 20, Prediction = 0 },
+    Aimbot = { Enabled = true, Smoothness = 0.6, MaxDistance = 250, FOV = 120,
+               ShowFOV = true, AimAt = "Head", TeamCheck = true,
+               VisibleCheck = false, AutoFire = true, AutoFireRange = 30, Prediction = 0 },
 }
 
 local Players = game:GetService("Players")
@@ -19,28 +18,22 @@ local Workspace = game:GetService("Workspace")
 local TweenService = game:GetService("TweenService")
 local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
 
-local IsMobile = (UserInputService.TouchEnabled and not UserInputService.MouseEnabled)
-
-local Aimbot = { Target = nil, Active = false, TouchPos = nil }
+local IsMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
+local Aimbot = { Target = nil, TargetPart = nil }
 local ESP_Objects = {}
 local ESP_Connections = {}
-local MobileTouchConnections = {}
+local MobileTouchCons = {}
 
-local function GetCamera()
-    return Workspace.CurrentCamera
+local function Log(m, l)
+    l = l or "INFO"
+    local t = l == "OK" and "[✓]" or l == "ERR" and "[✖]" or "[SCP]"
+    print(t, m)
 end
 
-local function Log(msg, level)
-    level = level or "INFO"
-    local tag = (level == "OK" and "[✓]" or
-                 level == "WARN" and "[⚠]" or
-                 level == "ERR" and "[✖]" or "[SCP]")
-    print(string.format("%s %s", tag, msg))
-end
-
--- 严格匹配游戏源码 InRun == true
-local function IsPlayerValid(plr)
+-- 匹配游戏源码: InRun == true 才算有效玩家
+local function IsValid(plr)
     if plr == LocalPlayer then return false end
     if not plr.Character then return false end
     local root = plr.Character:FindFirstChild("HumanoidRootPart")
@@ -51,137 +44,97 @@ local function IsPlayerValid(plr)
     return true
 end
 
-local function IsPVPEnabled(plr)
-    return plr:GetAttribute("PVPOff") ~= true
-end
+local function IsPvP(plr) return plr:GetAttribute("PVPOff") ~= true end
 
-local function ShouldTargetESP(plr)
-    if not IsPlayerValid(plr) then return false end
-    if CONFIG.ESP.TeamCheck then return IsPVPEnabled(plr) end
+local function ShouldESP(plr)
+    if not IsValid(plr) then return false end
+    if CONFIG.ESP.TeamCheck then return IsPvP(plr) end
     return true
 end
 
-local function ShouldTargetAimbot(plr)
-    if not IsPlayerValid(plr) then return false end
-    if CONFIG.Aimbot.TeamCheck then return IsPVPEnabled(plr) end
+local function ShouldAim(plr)
+    if not IsValid(plr) then return false end
+    if CONFIG.Aimbot.TeamCheck then return IsPvP(plr) end
     return true
 end
 
-local function GetCharacterPart(character, partName)
-    if not character then return nil end
-    if partName == "Head" then
-        return character:FindFirstChild("Head") or character:FindFirstChild("HumanoidRootPart")
-    elseif partName == "HumanoidRootPart" then
-        return character:FindFirstChild("HumanoidRootPart")
-    elseif partName == "Random" then
-        for _, name in ipairs({"Head", "HumanoidRootPart", "UpperTorso", "Torso"}) do
-            local p = character:FindFirstChild(name)
-            if p then return p end
+local function GetPart(char, name)
+    if not char then return nil end
+    if name == "Head" then return char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    elseif name == "HumanoidRootPart" then return char:FindFirstChild("HumanoidRootPart")
+    elseif name == "Random" then
+        for _, n in ipairs({"Head", "HumanoidRootPart", "UpperTorso", "Torso"}) do
+            local p = char:FindFirstChild(n); if p then return p end
         end
-        return character:FindFirstChild("HumanoidRootPart")
+        return char:FindFirstChild("HumanoidRootPart")
     end
-    return character:FindFirstChild(partName) or character:FindFirstChild("HumanoidRootPart")
+    return char:FindFirstChild(name) or char:FindFirstChild("HumanoidRootPart")
 end
 
-local FOVCircle = Drawing.new("Circle")
-FOVCircle.Thickness = 1.5
-FOVCircle.NumSides = 64
-FOVCircle.Radius = CONFIG.Aimbot.FOV
-FOVCircle.Color = Color3.fromRGB(50, 200, 255)
-FOVCircle.Filled = false
-FOVCircle.Visible = false
+-- FOV圆
+local FOVC = Drawing.new("Circle")
+FOVC.Thickness = 1.5; FOVC.NumSides = 64; FOVC.Radius = CONFIG.Aimbot.FOV
+FOVC.Color = Color3.fromRGB(50, 200, 255); FOVC.Filled = false; FOVC.Visible = false
 
-local function UpdateFOV()
-    local cam = GetCamera()
-    if not cam then FOVCircle.Visible = false; return end
-    FOVCircle.Visible = (CONFIG.Aimbot.Enabled and CONFIG.Aimbot.ShowFOV)
-    if not FOVCircle.Visible then return end
-    FOVCircle.Radius = CONFIG.Aimbot.FOV
-    if IsMobile then
-        FOVCircle.Position = Aimbot.TouchPos or (cam.ViewportSize / 2)
-    else
-        FOVCircle.Position = UserInputService:GetMouseLocation()
-    end
+local function UpdFOV()
+    local cam = Workspace.CurrentCamera
+    if not cam then FOVC.Visible = false; return end
+    FOVC.Visible = CONFIG.Aimbot.Enabled and CONFIG.Aimbot.ShowFOV
+    if not FOVC.Visible then return end
+    FOVC.Radius = CONFIG.Aimbot.FOV
+    if IsMobile then FOVC.Position = Aimbot.TouchPos or cam.ViewportSize / 2
+    else FOVC.Position = UserInputService:GetMouseLocation() end
 end
 
-local function CreateESP(plr)
+-- ESP
+local function MkESP(plr)
     if ESP_Objects[plr] then return end
     local d = {}
-    local function make(key, drawType, props)
-        local ok, obj = pcall(Drawing.new, drawType)
-        if not ok then return end
-        for pk, pv in pairs(props or {}) do pcall(function() obj[pk] = pv end) end
-        obj.Visible = false
-        d[key] = obj
+    local function mk(k, t, props)
+        local ok, o = pcall(Drawing.new, t); if not ok then return end
+        for pk, pv in pairs(props or {}) do pcall(function() o[pk] = pv end) end
+        o.Visible = false; d[k] = o
     end
-    make("Box", "Square", { Thickness = 1, Filled = false })
-    make("Line", "Line", { Thickness = 1 })
-    make("Name", "Text", { Center = true, Outline = true, Size = IsMobile and 12 or 14 })
-    make("Distance", "Text", { Center = true, Outline = true, Size = IsMobile and 10 or 12 })
-    make("HealthBg", "Square", { Thickness = 0, Filled = true, Color = Color3.fromRGB(30, 30, 30) })
-    make("HealthBar", "Square", { Thickness = 0, Filled = true })
+    mk("Box", "Square", { Thickness = 1, Filled = false })
+    mk("Line", "Line", { Thickness = 1 })
+    mk("Name", "Text", { Center = true, Outline = true, Size = IsMobile and 12 or 14 })
+    mk("Dist", "Text", { Center = true, Outline = true, Size = IsMobile and 10 or 12 })
+    mk("HbBg", "Square", { Thickness = 0, Filled = true, Color = Color3.fromRGB(30, 30, 30) })
+    mk("Hb", "Square", { Thickness = 0, Filled = true })
     ESP_Objects[plr] = d
 end
 
-local function RemoveESP(plr)
+local function RmESP(plr)
     local d = ESP_Objects[plr]
-    if d then
-        for _, obj in pairs(d) do pcall(function() obj:Remove() end) end
-        ESP_Objects[plr] = nil
-    end
+    if d then for _, o in pairs(d) do pcall(function() o:Remove() end) end; ESP_Objects[plr] = nil end
 end
 
-local function HideAllESP()
-    for _, d in pairs(ESP_Objects) do
-        if d then for _, obj in pairs(d) do pcall(function() obj.Visible = false end) end end
-    end
+local function HideESP()
+    for _, d in pairs(ESP_Objects) do if d then for _, o in pairs(d) do pcall(function() o.Visible = false end) end end end
 end
 
-local function UpdateESP()
-    local cam = GetCamera()
-    if not cam then HideAllESP(); return end
-    local myChar = LocalPlayer.Character
-    local myRoot = myChar and myChar:FindFirstChild("HumanoidRootPart")
-    if not myRoot then HideAllESP(); return end
-
-    for plr, drawings in pairs(ESP_Objects) do
-        if not drawings then continue end
-        if not ShouldTargetESP(plr) then
-            for _, obj in pairs(drawings) do pcall(function() obj.Visible = false end) end
-            continue
-        end
-        local char = plr.Character
-        local root = char and char:FindFirstChild("HumanoidRootPart")
-        local head = char and char:FindFirstChild("Head")
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        if not root or not head or not hum then
-            for _, obj in pairs(drawings) do pcall(function() obj.Visible = false end) end
-            continue
-        end
-        local dist = (root.Position - myRoot.Position).Magnitude
-        if dist > CONFIG.ESP.MaxDistance then
-            for _, obj in pairs(drawings) do pcall(function() obj.Visible = false end) end
-            continue
-        end
-        local ok1, headPos, onScreenH = pcall(cam.WorldToViewportPoint, cam, head.Position + Vector3.new(0, 0.5, 0))
-        local ok2, rootPos, onScreenR = pcall(cam.WorldToViewportPoint, cam, root.Position - Vector3.new(0, 0.2, 0))
-        if not ok1 or not ok2 or (not onScreenH and not onScreenR) then
-            for _, obj in pairs(drawings) do pcall(function() obj.Visible = false end) end
-            continue
-        end
-        local isPvP = IsPVPEnabled(plr)
-        local color = (CONFIG.ESP.TeamCheck and not isPvP) and CONFIG.ESP.TeamColor or CONFIG.ESP.Color
-        local boxH = math.abs(headPos.Y - rootPos.Y)
-        local boxW = math.max(boxH * 0.65, 4)
-        local boxX = rootPos.X - boxW / 2
-        local boxY = rootPos.Y
-
-        if drawings.Box then pcall(function()
-            drawings.Box.Size = Vector2.new(boxW, math.max(boxH, 4))
-            drawings.Box.Position = Vector2.new(boxX, boxY - boxH)
-            drawings.Box.Color = color; drawings.Box.Visible = CONFIG.ESP.Box
-        end) end
-        if drawings.Line then pcall(function()
+local function UpdESP()
+    local cam = Workspace.CurrentCamera
+    if not cam then HideESP(); return end
+    local mc = LocalPlayer.Character; local mr = mc and mc:FindFirstChild("HumanoidRootPart")
+    if not mr then HideESP(); return end
+    for plr, d in pairs(ESP_Objects) do
+        if not d then continue end
+        if not ShouldESP(plr) then for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue end
+        local c = plr.Character; local r = c and c:FindFirstChild("HumanoidRootPart")
+        local h = c and c:FindFirstChild("Head"); local hm = c and c:FindFirstChildOfClass("Humanoid")
+        if not r or not h or not hm then for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue end
+        local dist = (r.Position - mr.Position).Magnitude
+        if dist > CONFIG.ESP.MaxDistance then for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue end
+        local ok1, hp, oh = pcall(cam.WorldToViewportPoint, cam, h.Position + Vector3.new(0, 0.5, 0))
+        local ok2, rp, or_ = pcall(cam.WorldToViewportPoint, cam, r.Position - Vector3.new(0, 0.2, 0))
+        if not ok1 or not ok2 or (not oh and not or_) then for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue end
+        local pvp = IsPvP(plr)
+        local col = (CONFIG.ESP.TeamCheck and not pvp) and CONFIG.ESP.TeamColor or CONFIG.ESP.Color
+        local bh = math.abs(hp.Y - rp.Y); local bw = math.max(bh * 0.65, 4)
+        local bx = rp.X - bw / 2; local by = rp.Y
+        if d.Box then pcall(function() d.Box.Size = Vector2.new(bw, math.max(bh, 4)); d.Box.Position = Vector2.new(bx, by - bh); d.Box.Color = col; d.Box.Visible = CONFIG.ESP.Box end) end
+        if d.Line then pcall(function()
             local ss = cam.ViewportSize; local ox, oy
             if CONFIG.ESP.TracerOrigin == "Middle" then ox, oy = ss.X/2, ss.Y/2
             elseif CONFIG.ESP.TracerOrigin == "Mouse" then
@@ -189,312 +142,333 @@ local function UpdateESP()
                 elseif not IsMobile then local m = UserInputService:GetMouseLocation(); ox, oy = m.X, m.Y
                 else ox, oy = ss.X/2, ss.Y end
             else ox, oy = ss.X/2, ss.Y end
-            drawings.Line.From = Vector2.new(ox, oy); drawings.Line.To = Vector2.new(rootPos.X, rootPos.Y)
-            drawings.Line.Color = color; drawings.Line.Visible = CONFIG.ESP.Line
+            d.Line.From = Vector2.new(ox, oy); d.Line.To = Vector2.new(rp.X, rp.Y); d.Line.Color = col; d.Line.Visible = CONFIG.ESP.Line
         end) end
-        if drawings.Name then pcall(function()
-            drawings.Name.Text = plr.Name; drawings.Name.Position = Vector2.new(rootPos.X, boxY - boxH - 18)
-            drawings.Name.Color = color; drawings.Name.Visible = CONFIG.ESP.Name
-        end) end
-        if drawings.Distance then pcall(function()
-            drawings.Distance.Text = string.format("%.0f [%s]", dist, isPvP and "⚔" or "✓")
-            drawings.Distance.Position = Vector2.new(rootPos.X, boxY + 2)
-            drawings.Distance.Color = Color3.fromRGB(200,200,200); drawings.Distance.Visible = CONFIG.ESP.Distance
-        end) end
-        if drawings.HealthBar and drawings.HealthBg then pcall(function()
-            local hp = math.clamp(hum.Health/hum.MaxHealth, 0, 1)
-            drawings.HealthBg.Size = Vector2.new(4, boxH); drawings.HealthBg.Position = Vector2.new(boxX-6, boxY-boxH)
-            drawings.HealthBg.Visible = CONFIG.ESP.HealthBar
-            drawings.HealthBar.Size = Vector2.new(4, math.max(boxH*hp, 0))
-            drawings.HealthBar.Position = Vector2.new(boxX-6, boxY-boxH+boxH*(1-hp))
-            drawings.HealthBar.Color = Color3.fromRGB(math.floor((1-hp)*255), math.floor(hp*255), 0)
-            drawings.HealthBar.Visible = CONFIG.ESP.HealthBar
+        if d.Name then pcall(function() d.Name.Text = plr.Name; d.Name.Position = Vector2.new(rp.X, by - bh - 18); d.Name.Color = col; d.Name.Visible = CONFIG.ESP.Name end) end
+        if d.Dist then pcall(function() d.Dist.Text = string.format("%.0f [%s]", dist, pvp and "⚔" or "✓"); d.Dist.Position = Vector2.new(rp.X, by + 2); d.Dist.Color = Color3.fromRGB(200,200,200); d.Dist.Visible = CONFIG.ESP.Distance end) end
+        if d.Hb and d.HbBg then pcall(function()
+            local hpct = math.clamp(hm.Health / hm.MaxHealth, 0, 1)
+            d.HbBg.Size = Vector2.new(4, bh); d.HbBg.Position = Vector2.new(bx - 6, by - bh); d.HbBg.Visible = CONFIG.ESP.HealthBar
+            d.Hb.Size = Vector2.new(4, math.max(bh * hpct, 0)); d.Hb.Position = Vector2.new(bx - 6, by - bh + bh * (1 - hpct))
+            d.Hb.Color = Color3.fromRGB(math.floor((1 - hpct) * 255), math.floor(hpct * 255), 0); d.Hb.Visible = CONFIG.ESP.HealthBar
         end) end
     end
 end
+-- ===== 自瞄 + 子弹追踪 =====
 local function FindTarget()
-    local cam = GetCamera()
+    local cam = Workspace.CurrentCamera
     if not cam then return nil, nil end
-    local closestDist = CONFIG.Aimbot.FOV
-    local closestPlr, closestPart = nil, nil
-    local centerPos = (IsMobile and Aimbot.TouchPos) or UserInputService:GetMouseLocation()
-
+    local closest = CONFIG.Aimbot.FOV; local cp, cpart = nil, nil
+    local center = (IsMobile and Aimbot.TouchPos) or UserInputService:GetMouseLocation()
     for _, plr in ipairs(Players:GetPlayers()) do
-        if not ShouldTargetAimbot(plr) then continue end
-        local tp = GetCharacterPart(plr.Character, CONFIG.Aimbot.AimAt)
+        if not ShouldAim(plr) then continue end
+        local tp = GetPart(plr.Character, CONFIG.Aimbot.AimAt)
         if not tp then continue end
-        local ok, pos, onScreen = pcall(cam.WorldToViewportPoint, cam, tp.Position)
-        if not ok or not onScreen then continue end
-        local screenDist = (Vector2.new(pos.X, pos.Y) - centerPos).Magnitude
-        if screenDist < closestDist then
-            closestDist = screenDist; closestPlr = plr; closestPart = tp
-        end
+        local ok, pos, on = pcall(cam.WorldToViewportPoint, cam, tp.Position)
+        if not ok or not on then continue end
+        local sd = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+        if sd < closest then closest = sd; cp = plr; cpart = tp end
     end
-    return closestPlr, closestPart
+    return cp, cpart
 end
 
-local function AimAtTarget(target, targetPart)
-    if not target or not targetPart then return end
-    local myChar = LocalPlayer.Character
-    if not myChar then return end
-    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
-    if not myRoot then return end
-    local targetPos = targetPart.Position
+local function AimAt(tg, tp)
+    if not tg or not tp then return end
+    local mc = LocalPlayer.Character; if not mc then return end
+    local mr = mc:FindFirstChild("HumanoidRootPart"); if not mr then return end
+    local pos = tp.Position
     if CONFIG.Aimbot.Prediction > 0 then
-        local tr = target.Character and target.Character:FindFirstChild("HumanoidRootPart")
+        local tr = tg.Character and tg.Character:FindFirstChild("HumanoidRootPart")
         if tr then
-            targetPos = targetPos + tr.Velocity * ((myRoot.Position - targetPos).Magnitude / 120) * CONFIG.Aimbot.Prediction
+            pos = pos + tr.Velocity * ((mr.Position - pos).Magnitude / 120) * CONFIG.Aimbot.Prediction
         end
     end
-    local lookAtCF = CFrame.lookAt(myRoot.Position, targetPos) * CFrame.Angles(0, math.rad(180), 0)
+    local cf = CFrame.lookAt(mr.Position, pos) * CFrame.Angles(0, math.rad(180), 0)
     if CONFIG.Aimbot.Smoothness < 1 then
-        myRoot.CFrame = myRoot.CFrame:Lerp(lookAtCF, 1 - CONFIG.Aimbot.Smoothness)
+        mr.CFrame = mr.CFrame:Lerp(cf, 1 - CONFIG.Aimbot.Smoothness)
     else
-        myRoot.CFrame = lookAtCF
+        mr.CFrame = cf
     end
 end
 
-local function TryAutoFire(target)
-    if not CONFIG.Aimbot.AutoFire or not target or not target.Character then return end
-    local myChar = LocalPlayer.Character
-    if not myChar then return end
-    local myRoot = myChar:FindFirstChild("HumanoidRootPart")
-    local tRoot = target.Character:FindFirstChild("HumanoidRootPart")
-    if not myRoot or not tRoot then return end
-    if (myRoot.Position - tRoot.Position).Magnitude > CONFIG.Aimbot.AutoFireRange then return end
-    local function tryEquip(t)
-        if not t or not t:IsA("Tool") then return false end
-        if t.Parent ~= myChar then
-            if not pcall(function() t.Parent = myChar end) then return false end
-            task.wait(0.05)
+-- 子弹追踪核心：自动装备武器并攻击
+-- 匹配游戏源码: Tool.Activated → tryAttack() → Hitbox碰撞检测
+local lastAttackTime = 0
+local function BulletTrack(tg)
+    if not CONFIG.Aimbot.AutoFire or not tg or not tg.Character then return end
+    local mc = LocalPlayer.Character; if not mc then return end
+    local mr = mc:FindFirstChild("HumanoidRootPart")
+    local tr = tg.Character:FindFirstChild("HumanoidRootPart")
+    if not mr or not tr then return end
+    local dist = (mr.Position - tr.Position).Magnitude
+    if dist > CONFIG.Aimbot.AutoFireRange then return end
+
+    -- 每0.3秒攻击一次（匹配武器冷却）
+    local now = tick()
+    if now - lastAttackTime < 0.3 then return end
+    lastAttackTime = now
+
+    -- 查找武器：角色身上或背包里
+    local function DoAttack(tool)
+        if not tool or not tool:IsA("Tool") then return false end
+        -- 如果武器不在手中，先装备
+        if tool.Parent ~= mc then
+            local ok = pcall(function() tool.Parent = mc end)
+            if not ok then return false end
+            task.wait()
         end
-        if t.Parent == myChar then pcall(function() t:Activate() end); return true end
+        if tool.Parent == mc then
+            pcall(function() tool:Activate() end)  -- 触发游戏源码的tryAttack()
+            return true
+        end
         return false
     end
-    local eq = myChar:FindFirstChildOfClass("Tool")
-    if eq then tryEquip(eq); return end
+
+    -- 优先用手上的武器
+    local eq = mc:FindFirstChildOfClass("Tool")
+    if eq then DoAttack(eq); return end
+
+    -- 从背包拿武器
     local bp = LocalPlayer:FindFirstChild("Backpack")
-    if bp then for _, t in ipairs(bp:GetChildren()) do if tryEquip(t) then break end end end
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if DoAttack(t) then break end
+        end
+    end
 end
 
-local TouchAimActive = false
-local MenuToggleBtn = nil
-local TOUCH_AIM_DELAY = 0.05
+-- ===== 移动端触摸 =====
+local TouchActive = false
+local MenuBtn = nil
 
-local function SetupMobileControls()
+local function SetupMobile()
     if not IsMobile then return end
+    MenuBtn = Instance.new("TextButton")
+    MenuBtn.Name = "SCPMenu"; MenuBtn.Size = UDim2.new(0, 50, 0, 50)
+    MenuBtn.Position = UDim2.new(0.95, -55, 0.05, 5)
+    MenuBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40); MenuBtn.BackgroundTransparency = 0.15
+    MenuBtn.BorderSizePixel = 0; MenuBtn.Text = "⚙"; MenuBtn.TextColor3 = Color3.fromRGB(50, 200, 255)
+    MenuBtn.TextSize = 24; MenuBtn.Font = Enum.Font.GothamBold; MenuBtn.Active = true; MenuBtn.Draggable = true
+    MenuBtn.Parent = CoreGui
+    Instance.new("UICorner", MenuBtn).CornerRadius = UDim.new(0, 12)
+    local bs = Instance.new("UIStroke", MenuBtn); bs.Color = Color3.fromRGB(50, 200, 255); bs.Thickness = 1.5
 
-    MenuToggleBtn = Instance.new("TextButton")
-    MenuToggleBtn.Name = "SCPMenuToggle"
-    MenuToggleBtn.Size = UDim2.new(0, 50, 0, 50)
-    MenuToggleBtn.Position = UDim2.new(0.95, -55, 0.05, 5)
-    MenuToggleBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
-    MenuToggleBtn.BackgroundTransparency = 0.15
-    MenuToggleBtn.BorderSizePixel = 0
-    MenuToggleBtn.Text = "⚙"
-    MenuToggleBtn.TextColor3 = Color3.fromRGB(50, 200, 255)
-    MenuToggleBtn.TextSize = 24
-    MenuToggleBtn.Font = Enum.Font.GothamBold
-    MenuToggleBtn.Active = true
-    MenuToggleBtn.Draggable = true
-    MenuToggleBtn.Parent = CoreGui
-    Instance.new("UICorner", MenuToggleBtn).CornerRadius = UDim.new(0, 12)
-    local bs = Instance.new("UIStroke", MenuToggleBtn); bs.Color = Color3.fromRGB(50, 200, 255); bs.Thickness = 1.5
-
-    MenuToggleBtn.MouseButton1Click:Connect(function()
+    MenuBtn.MouseButton1Click:Connect(function()
         local sg = CoreGui:FindFirstChild("MyScriptUI")
-        if sg then
-            local mf = sg:FindFirstChild("MainFrame"); local ff = sg:FindFirstChild("FloatFrame")
-            if mf then local v = not mf.Visible; mf.Visible = v; if ff then ff.Visible = not v end end
-        end
+        if sg then local m = sg:FindFirstChild("MainFrame"); local f = sg:FindFirstChild("FloatFrame")
+            if m then local v = not m.Visible; m.Visible = v; if f then f.Visible = not v end end end
     end)
 
-    local function onTouchStart(t, gp)
+    UserInputService.TouchStarted:Connect(function(t, gp)
         if gp then return end
         local sg = CoreGui:FindFirstChild("MyScriptUI")
-        if sg then local mf = sg:FindFirstChild("MainFrame"); if mf and mf.Visible then return end end
+        if sg then local m = sg:FindFirstChild("MainFrame"); if m and m.Visible then return end end
         Aimbot.TouchPos = t.Position
-        task.delay(TOUCH_AIM_DELAY, function() if Aimbot.TouchPos then TouchAimActive = true end end)
-    end
-    local function onTouchMove(t, gp) if Aimbot.TouchPos then Aimbot.TouchPos = t.Position end end
-    local function onTouchEnd(t, gp) TouchAimActive = false; Aimbot.TouchPos = nil; Aimbot.Target = nil end
-
-    table.insert(MobileTouchConnections, UserInputService.TouchStarted:Connect(onTouchStart))
-    table.insert(MobileTouchConnections, UserInputService.TouchMoved:Connect(onTouchMove))
-    table.insert(MobileTouchConnections, UserInputService.TouchEnded:Connect(onTouchEnd))
+        task.delay(0.05, function() if Aimbot.TouchPos then TouchActive = true end end)
+    end)
+    UserInputService.TouchMoved:Connect(function(t) if Aimbot.TouchPos then Aimbot.TouchPos = t.Position end end)
+    UserInputService.TouchEnded:Connect(function() TouchActive = false; Aimbot.TouchPos = nil; Aimbot.Target = nil; Aimbot.TargetPart = nil end)
 end
 
-local function CustomNotify(title, text, duration)
-    duration = duration or 2
-    Log(title .. (text ~= "" and " - " .. text or ""))
-    local n = Instance.new("Frame")
-    n.Size = UDim2.new(0, 220, 0, 60); n.Position = UDim2.new(1, 10, 1, -10)
-    n.AnchorPoint = Vector2.new(1,1); n.BackgroundColor3 = Color3.fromRGB(30,30,30)
-    n.BackgroundTransparency = 0.1; n.BorderSizePixel = 0; n.Parent = CoreGui
+-- ===== 通知 =====
+local function Notify(title, text, dur)
+    dur = dur or 2; Log(title, "OK")
+    local n = Instance.new("Frame"); n.Size = UDim2.new(0, 220, 0, 60); n.Position = UDim2.new(1, 10, 1, -10)
+    n.AnchorPoint = Vector2.new(1,1); n.BackgroundColor3 = Color3.fromRGB(30,30,30); n.BackgroundTransparency = 0.1
+    n.BorderSizePixel = 0; n.Parent = CoreGui
     Instance.new("UICorner", n).CornerRadius = UDim.new(0, 8)
     local s = Instance.new("UIStroke", n); s.Thickness = 1.5; s.Color = Color3.fromRGB(100,200,100)
-    local tl = Instance.new("TextLabel", n)
-    tl.Size = UDim2.new(1,-16,0,20); tl.Position = UDim2.new(0,8,0,6)
+    local tl = Instance.new("TextLabel", n); tl.Size = UDim2.new(1,-16,0,20); tl.Position = UDim2.new(0,8,0,6)
     tl.BackgroundTransparency = 1; tl.Font = Enum.Font.SourceSansBold; tl.TextSize = 14
     tl.TextColor3 = Color3.new(1,1,1); tl.TextXAlignment = Enum.TextXAlignment.Left; tl.Text = title
-    local cl = Instance.new("TextLabel", n)
-    cl.Size = UDim2.new(1,-16,0,18); cl.Position = UDim2.new(0,8,0,30)
+    local cl = Instance.new("TextLabel", n); cl.Size = UDim2.new(1,-16,0,18); cl.Position = UDim2.new(0,8,0,30)
     cl.BackgroundTransparency = 1; cl.Font = Enum.Font.SourceSans; cl.TextSize = 13
     cl.TextColor3 = Color3.fromRGB(220,220,220); cl.TextXAlignment = Enum.TextXAlignment.Left; cl.Text = text
     n.Position = UDim2.new(1, 240, 1, -10)
-    TweenService:Create(n, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
-        { Position = UDim2.new(1, -230, 1, -10) }):Play()
-    task.delay(duration, function()
+    TweenService:Create(n, TweenInfo.new(0.3), { Position = UDim2.new(1, -230, 1, -10) }):Play()
+    task.delay(dur, function()
         if not n.Parent then return end
-        local ot = TweenService:Create(n, TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.In),
-            { Position = UDim2.new(1, 240, 1, -10) })
+        local ot = TweenService:Create(n, TweenInfo.new(0.3), { Position = UDim2.new(1, 240, 1, -10) })
         ot:Play(); ot.Completed:Connect(function() pcall(function() n:Destroy() end) end)
     end)
 end
+-- ===== UI =====
 local function CreateUI()
     local sg = Instance.new("ScreenGui")
     sg.Name = "MyScriptUI"; sg.ResetOnSpawn = false; sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; sg.Parent = CoreGui
 
-    local mf = Instance.new("Frame")
-    mf.Name = "MainFrame"; mf.Size = UDim2.new(0, 300, 0, 300)
-    mf.Position = UDim2.new(0.5, -150, 0.4, -150)
+    local mf = Instance.new("Frame"); mf.Name = "MainFrame"
+    mf.Size = UDim2.new(0, 300, 0, 330); mf.Position = UDim2.new(0.5, -150, 0.4, -165)
     mf.BackgroundColor3 = Color3.fromRGB(25,25,25); mf.BackgroundTransparency = 0.05
     mf.BorderSizePixel = 0; mf.Active = true; mf.Draggable = true; mf.Parent = sg
     Instance.new("UICorner", mf).CornerRadius = UDim.new(0, 10)
     local ms = Instance.new("UIStroke", mf); ms.Thickness = 2; ms.Color = Color3.fromRGB(255,100,100)
 
-    local tb = Instance.new("Frame", mf)
-    tb.Size = UDim2.new(1,0,0,32); tb.BackgroundColor3 = Color3.fromRGB(45,45,45); tb.BorderSizePixel = 0
+    local tb = Instance.new("Frame", mf); tb.Size = UDim2.new(1,0,0,32)
+    tb.BackgroundColor3 = Color3.fromRGB(45,45,45); tb.BorderSizePixel = 0
     Instance.new("UICorner", tb).CornerRadius = UDim.new(0, 10)
-    local tl = Instance.new("TextLabel", tb)
-    tl.Size = UDim2.new(1,-70,1,0); tl.Position = UDim2.new(0,12,0,0); tl.BackgroundTransparency = 1
-    tl.Font = Enum.Font.SourceSansBold; tl.TextSize = 16; tl.TextColor3 = Color3.new(1,1,1)
-    tl.TextXAlignment = Enum.TextXAlignment.Left; tl.Text = "SCP异常站点    作者:B站英吉利超入"
+    local tl = Instance.new("TextLabel", tb); tl.Size = UDim2.new(1,-70,1,0); tl.Position = UDim2.new(0,12,0,0)
+    tl.BackgroundTransparency = 1; tl.Font = Enum.Font.SourceSansBold; tl.TextSize = 16
+    tl.TextColor3 = Color3.new(1,1,1); tl.TextXAlignment = Enum.TextXAlignment.Left
+    tl.Text = "SCP异常站点    作者:B站英吉利超入"
 
-    local minBtn = Instance.new("TextButton", tb)
-    minBtn.Size = UDim2.new(0,24,0,24); minBtn.Position = UDim2.new(1,-56,0,4)
-    minBtn.Text = "—"; minBtn.Font = Enum.Font.SourceSansBold; minBtn.TextSize = 14
-    minBtn.TextColor3 = Color3.new(1,1,1); minBtn.BackgroundColor3 = Color3.fromRGB(100,100,100)
-    minBtn.BorderSizePixel = 0; Instance.new("UICorner", minBtn).CornerRadius = UDim.new(0, 4)
+    local minb = Instance.new("TextButton", tb); minb.Size = UDim2.new(0,24,0,24); minb.Position = UDim2.new(1,-56,0,4)
+    minb.Text = "—"; minb.Font = Enum.Font.SourceSansBold; minb.TextSize = 14; minb.TextColor3 = Color3.new(1,1,1)
+    minb.BackgroundColor3 = Color3.fromRGB(100,100,100); minb.BorderSizePixel = 0
+    Instance.new("UICorner", minb).CornerRadius = UDim.new(0, 4)
 
-    local closeBtn = Instance.new("TextButton", tb)
-    closeBtn.Size = UDim2.new(0,24,0,24); closeBtn.Position = UDim2.new(1,-28,0,4)
-    closeBtn.Text = "✕"; closeBtn.Font = Enum.Font.SourceSansBold; closeBtn.TextSize = 14
-    closeBtn.TextColor3 = Color3.new(1,1,1); closeBtn.BackgroundColor3 = Color3.fromRGB(200,80,80)
-    closeBtn.BorderSizePixel = 0; Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 4)
+    local closeb = Instance.new("TextButton", tb); closeb.Size = UDim2.new(0,24,0,24); closeb.Position = UDim2.new(1,-28,0,4)
+    closeb.Text = "✕"; closeb.Font = Enum.Font.SourceSansBold; closeb.TextSize = 14; closeb.TextColor3 = Color3.new(1,1,1)
+    closeb.BackgroundColor3 = Color3.fromRGB(200,80,80); closeb.BorderSizePixel = 0
+    Instance.new("UICorner", closeb).CornerRadius = UDim.new(0, 4)
 
-    local cf = Instance.new("Frame", mf)
-    cf.Size = UDim2.new(1,-24,1,-44); cf.Position = UDim2.new(0,12,0,38); cf.BackgroundTransparency = 1
-    local ll = Instance.new("UIListLayout", cf); ll.SortOrder = Enum.SortOrder.LayoutOrder; ll.Padding = UDim.new(0, 6)
+    local cf = Instance.new("Frame", mf); cf.Size = UDim2.new(1,-24,1,-44); cf.Position = UDim2.new(0,12,0,38)
+    cf.BackgroundTransparency = 1
+    local ll = Instance.new("UIListLayout", cf); ll.Padding = UDim.new(0, 6)
 
-    local function Toggle(text)
-        local b = Instance.new("TextButton")
-        b.Size = UDim2.new(1,0,0,36); b.Text = text; b.BackgroundColor3 = Color3.fromRGB(60,160,60)
-        b.TextColor3 = Color3.new(1,1,1); b.Font = Enum.Font.SourceSansBold; b.TextSize = 16; b.Parent = cf
-        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
-        return b
+    local function MkBtn(text)
+        local b = Instance.new("TextButton"); b.Size = UDim2.new(1,0,0,36); b.Text = text
+        b.BackgroundColor3 = Color3.fromRGB(60,160,60); b.TextColor3 = Color3.new(1,1,1)
+        b.Font = Enum.Font.SourceSansBold; b.TextSize = 16; b.Parent = cf
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8); return b
     end
-    local function Slider(title, min, max, def)
+    local function MkSlider(title, min, max, def)
         local f = Instance.new("Frame"); f.Size = UDim2.new(1,0,0,36); f.BackgroundTransparency = 1; f.Parent = cf
-        local l = Instance.new("TextLabel", f)
-        l.Size = UDim2.new(0.6,-10,0,16); l.BackgroundTransparency = 1; l.Font = Enum.Font.SourceSans
-        l.TextSize = 13; l.TextColor3 = Color3.new(1,1,1); l.TextXAlignment = Enum.TextXAlignment.Left
-        l.Text = title..": "..def
-        local inp = Instance.new("TextBox", f)
-        inp.Size = UDim2.new(0.35,-5,0,20); inp.Position = UDim2.new(0.65,0,0,0); inp.Text = tostring(def)
-        inp.BackgroundColor3 = Color3.fromRGB(50,50,50); inp.TextColor3 = Color3.new(1,1,1)
+        local lb = Instance.new("TextLabel", f); lb.Size = UDim2.new(0.6,-10,0,16); lb.BackgroundTransparency = 1
+        lb.Font = Enum.Font.SourceSans; lb.TextSize = 13; lb.TextColor3 = Color3.new(1,1,1)
+        lb.TextXAlignment = Enum.TextXAlignment.Left; lb.Text = title..": "..def
+        local inp = Instance.new("TextBox", f); inp.Size = UDim2.new(0.35,-5,0,20); inp.Position = UDim2.new(0.65,0,0,0)
+        inp.Text = tostring(def); inp.BackgroundColor3 = Color3.fromRGB(50,50,50); inp.TextColor3 = Color3.new(1,1,1)
         inp.Font = Enum.Font.SourceSans; inp.TextSize = 13; inp.ClearTextOnFocus = false
         Instance.new("UICorner", inp).CornerRadius = UDim.new(0, 4)
-        return {Get=function() return tonumber(inp.Text) or def end, Set=function(v) inp.Text=tostring(v); l.Text=title..": "..v end, Inp=inp}
+        return {G=function() return tonumber(inp.Text) or def end, S=function(v) inp.Text=tostring(v); lb.Text=title..": "..v end, I=inp}
     end
 
-    local et = Toggle("ESP 透视（开启）")
-    et.MouseButton1Click:Connect(function() CONFIG.ESP.Enabled = not CONFIG.ESP.Enabled
-        et.Text = CONFIG.ESP.Enabled and "ESP 透视（开启）" or "ESP 透视（关闭）"
-        et.BackgroundColor3 = CONFIG.ESP.Enabled and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60) end)
-    local at = Toggle("自瞄（开启）")
-    at.MouseButton1Click:Connect(function() CONFIG.Aimbot.Enabled = not CONFIG.Aimbot.Enabled
-        at.Text = CONFIG.Aimbot.Enabled and "自瞄（开启）" or "自瞄（关闭）"
-        at.BackgroundColor3 = CONFIG.Aimbot.Enabled and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60) end)
-    local tt = Toggle("队伍检测（开启）")
-    tt.MouseButton1Click:Connect(function() CONFIG.Aimbot.TeamCheck = not CONFIG.Aimbot.TeamCheck
-        CONFIG.ESP.TeamCheck = CONFIG.Aimbot.TeamCheck
-        local s = CONFIG.Aimbot.TeamCheck and "开启" or "关闭"; tt.Text = "队伍检测（"..s.."）"
-        tt.BackgroundColor3 = CONFIG.Aimbot.TeamCheck and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60) end)
-    local fs = Slider("FOV范围", 20, 500, CONFIG.Aimbot.FOV)
-    fs.Inp.FocusLost:Connect(function(e) if e then local v=math.clamp(tonumber(fs.Inp.Text) or CONFIG.Aimbot.FOV,20,500); CONFIG.Aimbot.FOV=v; fs.Set(v) end end)
-    local ss = Slider("平滑度", 0, 1, CONFIG.Aimbot.Smoothness)
-    ss.Inp.FocusLost:Connect(function(e) if e then local v=math.clamp(tonumber(ss.Inp.Text) or CONFIG.Aimbot.Smoothness,0,1); CONFIG.Aimbot.Smoothness=v; ss.Set(v) end end)
+    -- ESP开关
+    local espBt = MkBtn("ESP 透视（开启）")
+    espBt.MouseButton1Click:Connect(function()
+        CONFIG.ESP.Enabled = not CONFIG.ESP.Enabled
+        espBt.Text = CONFIG.ESP.Enabled and "ESP 透视（开启）" or "ESP 透视（关闭）"
+        espBt.BackgroundColor3 = CONFIG.ESP.Enabled and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+    end)
 
-    local ff = Instance.new("Frame", sg)
-    ff.Name = "FloatFrame"; ff.Size = UDim2.new(0, 200, 0, 30)
-    ff.Position = UDim2.new(0.5, -100, 0, 10)
+    -- 自瞄开关
+    local aimBt = MkBtn("自瞄（开启）")
+    aimBt.MouseButton1Click:Connect(function()
+        CONFIG.Aimbot.Enabled = not CONFIG.Aimbot.Enabled
+        aimBt.Text = CONFIG.Aimbot.Enabled and "自瞄（开启）" or "自瞄（关闭）"
+        aimBt.BackgroundColor3 = CONFIG.Aimbot.Enabled and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+    end)
+
+    -- 子弹追踪开关
+    local btBt = MkBtn("子弹追踪（开启）")
+    btBt.MouseButton1Click:Connect(function()
+        CONFIG.Aimbot.AutoFire = not CONFIG.Aimbot.AutoFire
+        btBt.Text = CONFIG.Aimbot.AutoFire and "子弹追踪（开启）" or "子弹追踪（关闭）"
+        btBt.BackgroundColor3 = CONFIG.Aimbot.AutoFire and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+    end)
+
+    -- 队伍检测
+    local tmBt = MkBtn("队伍检测（开启）")
+    tmBt.MouseButton1Click:Connect(function()
+        CONFIG.Aimbot.TeamCheck = not CONFIG.Aimbot.TeamCheck; CONFIG.ESP.TeamCheck = CONFIG.Aimbot.TeamCheck
+        local s = CONFIG.Aimbot.TeamCheck and "开启" or "关闭"; tmBt.Text = "队伍检测（"..s.."）"
+        tmBt.BackgroundColor3 = CONFIG.Aimbot.TeamCheck and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+    end)
+
+    -- FOV
+    local fovSl = MkSlider("FOV范围", 20, 500, CONFIG.Aimbot.FOV)
+    fovSl.I.FocusLost:Connect(function(e)
+        if e then local v = math.clamp(tonumber(fovSl.I.Text) or CONFIG.Aimbot.FOV, 20, 500)
+            CONFIG.Aimbot.FOV = v; fovSl.S(v) end
+    end)
+
+    -- 平滑度
+    local smSl = MkSlider("平滑度", 0, 1, CONFIG.Aimbot.Smoothness)
+    smSl.I.FocusLost:Connect(function(e)
+        if e then local v = math.clamp(tonumber(smSl.I.Text) or CONFIG.Aimbot.Smoothness, 0, 1)
+            CONFIG.Aimbot.Smoothness = v; smSl.S(v) end
+    end)
+
+    -- 攻击距离
+    local atSl = MkSlider("攻击距离", 5, 100, CONFIG.Aimbot.AutoFireRange)
+    atSl.I.FocusLost:Connect(function(e)
+        if e then local v = math.clamp(tonumber(atSl.I.Text) or CONFIG.Aimbot.AutoFireRange, 5, 100)
+            CONFIG.Aimbot.AutoFireRange = v; atSl.S(v) end
+    end)
+
+    -- 悬浮窗
+    local ff = Instance.new("Frame", sg); ff.Name = "FloatFrame"
+    ff.Size = UDim2.new(0, 200, 0, 30); ff.Position = UDim2.new(0.5, -100, 0, 10)
     ff.BackgroundColor3 = Color3.fromRGB(35,35,35); ff.BackgroundTransparency = 0.1
     ff.BorderSizePixel = 0; ff.Visible = false; ff.Active = true; ff.Draggable = true
     Instance.new("UICorner", ff).CornerRadius = UDim.new(0, 15)
     local ffs = Instance.new("UIStroke", ff); ffs.Thickness = 1.5; ffs.Color = Color3.fromRGB(255,100,100)
-    local fl = Instance.new("TextLabel", ff)
-    fl.Size = UDim2.new(1,0,1,0); fl.BackgroundTransparency = 1; fl.Font = Enum.Font.SourceSansBold
-    fl.TextSize = 14; fl.TextColor3 = Color3.new(1,1,1); fl.Text = "SCP异常站点脚本(作者:B站英吉利超入)"
-    fl.TextXAlignment = Enum.TextXAlignment.Center; fl.TextScaled = true
+    local fl = Instance.new("TextLabel", ff); fl.Size = UDim2.new(1,0,1,0); fl.BackgroundTransparency = 1
+    fl.Font = Enum.Font.SourceSansBold; fl.TextSize = 14; fl.TextColor3 = Color3.new(1,1,1)
+    fl.Text = "SCP异常站点脚本(作者:B站英吉利超入)"; fl.TextXAlignment = Enum.TextXAlignment.Center; fl.TextScaled = true
 
     ff.MouseButton1Click:Connect(function() mf.Visible = true; ff.Visible = false end)
-    minBtn.MouseButton1Click:Connect(function() mf.Visible = false; ff.Visible = true end)
-    closeBtn.MouseButton1Click:Connect(function() mf.Visible = false; ff.Visible = false; CustomNotify("脚本运行中", "按⚙按钮可重新打开面板", 2) end)
+    minb.MouseButton1Click:Connect(function() mf.Visible = false; ff.Visible = true end)
+    closeb.MouseButton1Click:Connect(function() mf.Visible = false; ff.Visible = false; Notify("脚本运行中", "按⚙按钮可重新打开面板", 2) end)
 
     RunService.Heartbeat:Connect(function()
-        local h = (tick() * 0.5) % 1; local c = Color3.fromHSV(h, 1, 1)
-        pcall(function() ms.Color = c; if ffs and ffs.Parent then ffs.Color = c end end)
+        local h = (tick() * 0.5) % 1; local c = Color3.fromHSV(h, 1, 1); pcall(function() ms.Color = c; if ffs and ffs.Parent then ffs.Color = c end end)
     end)
 end
 
-local function CleanupAll()
+-- ===== 清理 =====
+local function Clean()
     for _, d in pairs(ESP_Objects) do if d then for _, o in pairs(d) do pcall(function() o:Remove() end) end end end
-    ESP_Objects = {}; pcall(function() FOVCircle:Remove() end)
-    if MenuToggleBtn then pcall(function() MenuToggleBtn:Destroy() end); MenuToggleBtn = nil end
-    for _, c in ipairs(MobileTouchConnections) do pcall(function() c:Disconnect() end) end
-    MobileTouchConnections = {}
-    for _, c in ipairs(ESP_Connections) do pcall(function() c:Disconnect() end) end
-    ESP_Connections = {}
+    ESP_Objects = {}; pcall(function() FOVC:Remove() end)
+    if MenuBtn then pcall(function() MenuBtn:Destroy() end); MenuBtn = nil end
+    for _, c in ipairs(MobileTouchCons) do pcall(function() c:Disconnect() end) end; MobileTouchCons = {}
+    for _, c in ipairs(ESP_Connections) do pcall(function() c:Disconnect() end) end; ESP_Connections = {}
     pcall(function() local s = CoreGui:FindFirstChild("MyScriptUI"); if s then s:Destroy() end end)
 end
 
+-- ===== 启动 =====
 local function Init()
-    CreateUI(); SetupMobileControls()
-    for _, p in ipairs(Players:GetPlayers()) do CreateESP(p) end
-    table.insert(ESP_Connections, Players.PlayerAdded:Connect(function(p)
-        CreateESP(p)
-        table.insert(ESP_Connections, p.CharacterAdded:Connect(function() task.wait(0.5); CreateESP(p) end))
-    end))
-    table.insert(ESP_Connections, Players.PlayerRemoving:Connect(RemoveESP))
-    table.insert(ESP_Connections, LocalPlayer.CharacterAdded:Connect(function()
-        task.wait(1)
-        for _, p in ipairs(Players:GetPlayers()) do if p ~= LocalPlayer then CreateESP(p) end end
-    end))
+    CreateUI(); SetupMobile()
+    for _, p in ipairs(Players:GetPlayers()) do MkESP(p) end
+    table.insert(ESP_Connections, Players.PlayerAdded:Connect(function(p) MkESP(p)
+        table.insert(ESP_Connections, p.CharacterAdded:Connect(function() task.wait(0.5); MkESP(p) end)) end))
+    table.insert(ESP_Connections, Players.PlayerRemoving:Connect(RmESP))
+    table.insert(ESP_Connections, LocalPlayer.CharacterAdded:Connect(function() task.wait(1)
+        for _, p in ipairs(Players:GetPlayers()) do if p ~= LocalPlayer then MkESP(p) end end end))
     if not IsMobile then
         table.insert(ESP_Connections, UserInputService.InputBegan:Connect(function(inp, gp)
             if gp then return end
             if inp.KeyCode == Enum.KeyCode.RightShift then
                 local s = CoreGui:FindFirstChild("MyScriptUI")
                 if s then local m = s:FindFirstChild("MainFrame"); local f = s:FindFirstChild("FloatFrame")
-                    if m then local v = not m.Visible; m.Visible = v; if f then f.Visible = not v end end end
-            end
-        end))
+                    if m then local v = not m.Visible; m.Visible = v; if f then f.Visible = not v end end end end end))
     end
-    table.insert(ESP_Connections, LocalPlayer.OnTeleport:Connect(function(s) if s == Enum.TeleportState.Leaving then CleanupAll() end end))
-    Log(string.format("启动[%s]", IsMobile and "移动端" or "PC端"), "OK")
-    CustomNotify("SCP异常站点", "脚本已加载 | 作者:B站英吉利超入", 3)
+    table.insert(ESP_Connections, LocalPlayer.OnTeleport:Connect(function(s) if s == Enum.TeleportState.Leaving then Clean() end end))
+    Log("启动成功 "..(IsMobile and "移动端" or "PC端"), "OK")
+    Notify("SCP异常站点", "脚本已加载 | 作者:B站英吉利超入", 3)
 end
 
 Init()
 
+-- 主循环
 RunService.RenderStepped:Connect(function()
-    pcall(UpdateFOV)
-    if CONFIG.ESP.Enabled then pcall(UpdateESP) else pcall(HideAllESP) end
+    pcall(UpdFOV)
+    if CONFIG.ESP.Enabled then pcall(UpdESP) else pcall(HideESP) end
+
     if CONFIG.Aimbot.Enabled then
-        local a = IsMobile and TouchAimActive or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
-        if a then local t, tp = FindTarget()
-            if t then Aimbot.Target = t; AimAtTarget(t, tp); TryAutoFire(t) else Aimbot.Target = nil end
-        else Aimbot.Target = nil end
+        local active = IsMobile and TouchActive or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
+        if active then
+            local t, tp = FindTarget()
+            if t then
+                Aimbot.Target = t; Aimbot.TargetPart = tp
+                AimAt(t, tp)
+                BulletTrack(t)  -- 子弹追踪（自动攻击）
+            else
+                Aimbot.Target = nil; Aimbot.TargetPart = nil
+            end
+        else
+            Aimbot.Target = nil; Aimbot.TargetPart = nil
+        end
     end
 end)
