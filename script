@@ -39,7 +39,7 @@ local function Log(msg, level)
     print(string.format("%s %s", tag, msg))
 end
 
--- 应该没问题 InRun == true
+-- 严格匹配游戏源码 InRun == true
 local function IsPlayerValid(plr)
     if plr == LocalPlayer then return false end
     if not plr.Character then return false end
