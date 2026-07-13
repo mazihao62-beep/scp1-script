@@ -2,13 +2,13 @@
 --作者:B站英吉利超入
 
 local CONFIG = {
-    ESP = { Enabled = true, Box = true, Line = true, Name = true, Distance = true,
+    ESP = { Enabled = false, Box = true, Line = true, Name = true, Distance = true,
             HealthBar = true, TracerOrigin = "Bottom", MaxDistance = 500,
             TeamCheck = true, Color = Color3.fromRGB(255, 50, 50),
             TeamColor = Color3.fromRGB(50, 255, 50) },
-    Aimbot = { Enabled = true, Smoothness = 0.6, MaxDistance = 250, FOV = 120,
+    Aimbot = { Enabled = false, Smoothness = 0.6, MaxDistance = 250, FOV = 120,
                ShowFOV = true, AimAt = "Head", TeamCheck = true,
-               VisibleCheck = false, AutoFire = true, AutoFireRange = 30, Prediction = 0 },
+               VisibleCheck = false, AutoFire = false, AutoFireRange = 30, Prediction = 0 },
 }
 
 local Players = game:GetService("Players")
@@ -20,7 +20,7 @@ local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 
 local IsMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
-local Aimbot = { Target = nil, TargetPart = nil }
+local Aimbot = { Target = nil, TargetPart = nil, TouchPos = nil }
 
 local ESP_Objects = {}
 local ESP_Connections = {}
@@ -32,6 +32,7 @@ local function Log(m, l)
     print(t, m)
 end
 
+-- ★修复: 只有 InRun == false 才跳过，nil（未设置）也视为有效
 local function IsValid(plr)
     if plr == LocalPlayer then return false end
     if not plr.Character then return false end
@@ -39,7 +40,8 @@ local function IsValid(plr)
     if not root then return false end
     local hum = plr.Character:FindFirstChildOfClass("Humanoid")
     if not hum or hum.Health <= 0 then return false end
-    if plr:GetAttribute("InRun") ~= true then return false end
+    -- 只有明确为false才跳过（对应游戏中的"不在副本中"）
+    if plr:GetAttribute("InRun") == false then return false end
     return true
 end
 
@@ -70,7 +72,7 @@ local function GetPart(char, name)
     return char:FindFirstChild(name) or char:FindFirstChild("HumanoidRootPart")
 end
 
--- FOV圆圈 (Drawing)
+-- FOV圆圈
 local FOVC = Drawing.new("Circle")
 FOVC.Thickness = 1.5; FOVC.NumSides = 64; FOVC.Radius = CONFIG.Aimbot.FOV
 FOVC.Color = Color3.fromRGB(50, 200, 255); FOVC.Filled = false; FOVC.Visible = CONFIG.Aimbot.ShowFOV
@@ -78,7 +80,7 @@ FOVC.Color = Color3.fromRGB(50, 200, 255); FOVC.Filled = false; FOVC.Visible = C
 local function UpdFOV()
     local cam = Workspace.CurrentCamera
     if not cam then FOVC.Visible = false; return end
-    FOVC.Visible = CONFIG.Aimbot.Enabled and CONFIG.Aimbot.ShowFOV
+    FOVC.Visible = CONFIG.Aimbot.ShowFOV
     if not FOVC.Visible then return end
     FOVC.Radius = CONFIG.Aimbot.FOV
     if IsMobile then FOVC.Position = Aimbot.TouchPos or cam.ViewportSize / 2
@@ -116,24 +118,42 @@ end
 
 local function UpdESP()
     local cam = Workspace.CurrentCamera
-    if not cam then HideESP(); return end
+    if not cam then return end
     local mc = LocalPlayer.Character; local mr = mc and mc:FindFirstChild("HumanoidRootPart")
-    if not mr then HideESP(); return end
+    if not mr then return end
     for plr, d in pairs(ESP_Objects) do
         if not d then continue end
-        if not ShouldESP(plr) then for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue end
+        if not ShouldESP(plr) then
+            for _, o in pairs(d) do pcall(function() o.Visible = false end) end
+            continue
+        end
         local c = plr.Character; local r = c and c:FindFirstChild("HumanoidRootPart")
         local h = c and c:FindFirstChild("Head"); local hm = c and c:FindFirstChildOfClass("Humanoid")
-        if not r or not h or not hm then for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue end
+        if not r or not h or not hm then
+            for _, o in pairs(d) do pcall(function() o.Visible = false end) end
+            continue
+        end
         local dist = (r.Position - mr.Position).Magnitude
-        if dist > CONFIG.ESP.MaxDistance then for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue end
-        local ok1, hp, oh = pcall(cam.WorldToViewportPoint, cam, h.Position + Vector3.new(0, 0.5, 0))
-        local ok2, rp, or_ = pcall(cam.WorldToViewportPoint, cam, r.Position - Vector3.new(0, 0.2, 0))
-        if not ok1 or not ok2 or (not oh and not or_) then for _, o in pairs(d) do pcall(function() o.Visible = false end) end; continue end
+        if dist > CONFIG.ESP.MaxDistance then
+            for _, o in pairs(d) do pcall(function() o.Visible = false end) end
+            continue
+        end
+
+        -- 安全获取屏幕坐标
+        local hp, oh = nil, false
+        local rp, or_ = nil, false
+        pcall(function() hp, oh = cam:WorldToViewportPoint(h.Position + Vector3.new(0, 0.5, 0)) end)
+        pcall(function() rp, or_ = cam:WorldToViewportPoint(r.Position - Vector3.new(0, 0.2, 0)) end)
+        if not hp or not rp or (not oh and not or_) then
+            for _, o in pairs(d) do pcall(function() o.Visible = false end) end
+            continue
+        end
+
         local pvp = IsPvP(plr)
         local col = (CONFIG.ESP.TeamCheck and not pvp) and CONFIG.ESP.TeamColor or CONFIG.ESP.Color
         local bh = math.abs(hp.Y - rp.Y); local bw = math.max(bh * 0.65, 4)
         local bx = rp.X - bw / 2; local by = rp.Y
+
         if d.Box then pcall(function()
             d.Box.Size = Vector2.new(bw, math.max(bh, 4)); d.Box.Position = Vector2.new(bx, by - bh)
             d.Box.Color = col; d.Box.Visible = CONFIG.ESP.Box
@@ -146,20 +166,26 @@ local function UpdESP()
                 elseif not IsMobile then local m = UserInputService:GetMouseLocation(); ox, oy = m.X, m.Y
                 else ox, oy = ss.X/2, ss.Y end
             else ox, oy = ss.X/2, ss.Y end
-            d.Line.From = Vector2.new(ox, oy); d.Line.To = Vector2.new(rp.X, rp.Y); d.Line.Color = col; d.Line.Visible = CONFIG.ESP.Line
+            d.Line.From = Vector2.new(ox, oy); d.Line.To = Vector2.new(rp.X, rp.Y)
+            d.Line.Color = col; d.Line.Visible = CONFIG.ESP.Line
         end) end
         if d.Name then pcall(function()
-            d.Name.Text = plr.Name; d.Name.Position = Vector2.new(rp.X, by - bh - 18); d.Name.Color = col; d.Name.Visible = CONFIG.ESP.Name
+            d.Name.Text = plr.Name; d.Name.Position = Vector2.new(rp.X, by - bh - 18)
+            d.Name.Color = col; d.Name.Visible = CONFIG.ESP.Name
         end) end
         if d.Dist then pcall(function()
             d.Dist.Text = string.format("%.0f [%s]", dist, pvp and "⚔" or "✓")
-            d.Dist.Position = Vector2.new(rp.X, by + 2); d.Dist.Color = Color3.fromRGB(200,200,200); d.Dist.Visible = CONFIG.ESP.Distance
+            d.Dist.Position = Vector2.new(rp.X, by + 2); d.Dist.Color = Color3.fromRGB(200,200,200)
+            d.Dist.Visible = CONFIG.ESP.Distance
         end) end
         if d.Hb and d.HbBg then pcall(function()
             local hpct = math.clamp(hm.Health / hm.MaxHealth, 0, 1)
-            d.HbBg.Size = Vector2.new(4, bh); d.HbBg.Position = Vector2.new(bx - 6, by - bh); d.HbBg.Visible = CONFIG.ESP.HealthBar
-            d.Hb.Size = Vector2.new(4, math.max(bh * hpct, 0)); d.Hb.Position = Vector2.new(bx - 6, by - bh + bh * (1 - hpct))
-            d.Hb.Color = Color3.fromRGB(math.floor((1 - hpct) * 255), math.floor(hpct * 255), 0); d.Hb.Visible = CONFIG.ESP.HealthBar
+            d.HbBg.Size = Vector2.new(4, bh); d.HbBg.Position = Vector2.new(bx - 6, by - bh)
+            d.HbBg.Visible = CONFIG.ESP.HealthBar
+            d.Hb.Size = Vector2.new(4, math.max(bh * hpct, 0))
+            d.Hb.Position = Vector2.new(bx - 6, by - bh + bh * (1 - hpct))
+            d.Hb.Color = Color3.fromRGB(math.floor((1 - hpct) * 255), math.floor(hpct * 255), 0)
+            d.Hb.Visible = CONFIG.ESP.HealthBar
         end) end
     end
 end
@@ -173,8 +199,9 @@ local function FindTarget()
         if not ShouldAim(plr) then continue end
         local tp = GetPart(plr.Character, CONFIG.Aimbot.AimAt)
         if not tp then continue end
-        local ok, pos, on = pcall(cam.WorldToViewportPoint, cam, tp.Position)
-        if not ok or not on then continue end
+        local pos, on = nil, false
+        pcall(function() pos, on = cam:WorldToViewportPoint(tp.Position) end)
+        if not pos or not on then continue end
         local sd = (Vector2.new(pos.X, pos.Y) - center).Magnitude
         if sd < closest then closest = sd; cp = plr; cpart = tp end
     end
@@ -257,8 +284,10 @@ local function SetupMobile()
 
     MenuBtn.MouseButton1Click:Connect(function()
         local sg = CoreGui:FindFirstChild("MyScriptUI")
-        if sg then local m = sg:FindFirstChild("MainFrame"); local f = sg:FindFirstChild("FloatFrame")
-            if m then local v = not m.Visible; m.Visible = v; if f then f.Visible = not v end end end
+        if sg then
+            local m = sg:FindFirstChild("MainFrame"); local f = sg:FindFirstChild("FloatFrame")
+            if m then local v = not m.Visible; m.Visible = v; if f then f.Visible = not v end end
+        end
     end)
 
     UserInputService.TouchStarted:Connect(function(t, gp)
@@ -297,7 +326,6 @@ local function Notify(title, text, dur)
     end)
 end
 -- ===== UI =====
--- ★修复: FloatFrame改为TextButton，有MouseButton1Click事件
 local function CreateUI()
     local sg = Instance.new("ScreenGui")
     sg.Name = "MyScriptUI"; sg.ResetOnSpawn = false; sg.ZIndexBehavior = Enum.ZIndexBehavior.Sibling; sg.Parent = CoreGui
@@ -331,10 +359,10 @@ local function CreateUI()
     cf.BackgroundTransparency = 1
     local ll = Instance.new("UIListLayout", cf); ll.Padding = UDim.new(0, 6)
 
-    local function MkBtn(text)
+    local function MkBtn(text, isOn)
         local b = Instance.new("TextButton"); b.Size = UDim2.new(1,0,0,36); b.Text = text
-        b.BackgroundColor3 = Color3.fromRGB(60,160,60); b.TextColor3 = Color3.new(1,1,1)
-        b.Font = Enum.Font.SourceSansBold; b.TextSize = 16; b.Parent = cf
+        b.BackgroundColor3 = isOn and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+        b.TextColor3 = Color3.new(1,1,1); b.Font = Enum.Font.SourceSansBold; b.TextSize = 16; b.Parent = cf
         Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8); return b
     end
     local function MkSlider(title, min, max, def)
@@ -349,68 +377,61 @@ local function CreateUI()
         return {G=function() return tonumber(inp.Text) or def end, S=function(v) inp.Text=tostring(v); lb.Text=title..": "..v end, I=inp}
     end
 
-    -- ESP开关
-    local espBt = MkBtn("ESP 透视（开启）")
+    -- 所有功能默认关闭
+    local espBt = MkBtn("ESP 透视（关闭）", false)
     espBt.MouseButton1Click:Connect(function()
-        CONFIG.ESP.Enabled = not CONFIG.ESP.Enabled
-        espBt.Text = CONFIG.ESP.Enabled and "ESP 透视（开启）" or "ESP 透视（关闭）"
-        espBt.BackgroundColor3 = CONFIG.ESP.Enabled and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+        CONFIG.ESP.Enabled = not CONFIG.ESP.Enabled; local s = CONFIG.ESP.Enabled
+        espBt.Text = s and "ESP 透视（开启）" or "ESP 透视（关闭）"
+        espBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    -- 自瞄开关
-    local aimBt = MkBtn("自瞄（开启）")
+    local aimBt = MkBtn("自瞄（关闭）", false)
     aimBt.MouseButton1Click:Connect(function()
-        CONFIG.Aimbot.Enabled = not CONFIG.Aimbot.Enabled
-        aimBt.Text = CONFIG.Aimbot.Enabled and "自瞄（开启）" or "自瞄（关闭）"
-        aimBt.BackgroundColor3 = CONFIG.Aimbot.Enabled and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+        CONFIG.Aimbot.Enabled = not CONFIG.Aimbot.Enabled; local s = CONFIG.Aimbot.Enabled
+        aimBt.Text = s and "自瞄（开启）" or "自瞄（关闭）"
+        aimBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    -- 子弹追踪开关
-    local btBt = MkBtn("子弹追踪（开启）")
+    local btBt = MkBtn("子弹追踪（关闭）", false)
     btBt.MouseButton1Click:Connect(function()
-        CONFIG.Aimbot.AutoFire = not CONFIG.Aimbot.AutoFire
-        btBt.Text = CONFIG.Aimbot.AutoFire and "子弹追踪（开启）" or "子弹追踪（关闭）"
-        btBt.BackgroundColor3 = CONFIG.Aimbot.AutoFire and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+        CONFIG.Aimbot.AutoFire = not CONFIG.Aimbot.AutoFire; local s = CONFIG.Aimbot.AutoFire
+        btBt.Text = s and "子弹追踪（开启）" or "子弹追踪（关闭）"
+        btBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    -- FOV圆圈开关（新功能）
-    local fovBt = MkBtn("FOV圆圈（显示）")
+    local fovBt = MkBtn("FOV圆圈（显示）", true)
     fovBt.MouseButton1Click:Connect(function()
-        CONFIG.Aimbot.ShowFOV = not CONFIG.Aimbot.ShowFOV
-        fovBt.Text = CONFIG.Aimbot.ShowFOV and "FOV圆圈（显示）" or "FOV圆圈（隐藏）"
-        fovBt.BackgroundColor3 = CONFIG.Aimbot.ShowFOV and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+        CONFIG.Aimbot.ShowFOV = not CONFIG.Aimbot.ShowFOV; local s = CONFIG.Aimbot.ShowFOV
+        fovBt.Text = s and "FOV圆圈（显示）" or "FOV圆圈（隐藏）"
+        fovBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    -- 队伍检测
-    local tmBt = MkBtn("队伍检测（开启）")
+    local tmBt = MkBtn("队伍检测（开启）", true)
     tmBt.MouseButton1Click:Connect(function()
         CONFIG.Aimbot.TeamCheck = not CONFIG.Aimbot.TeamCheck; CONFIG.ESP.TeamCheck = CONFIG.Aimbot.TeamCheck
-        local s = CONFIG.Aimbot.TeamCheck and "开启" or "关闭"; tmBt.Text = "队伍检测（"..s.."）"
-        tmBt.BackgroundColor3 = CONFIG.Aimbot.TeamCheck and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
+        local s = CONFIG.Aimbot.TeamCheck; tmBt.Text = s and "队伍检测（开启）" or "队伍检测（关闭）"
+        tmBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    -- FOV滑块
     local fovSl = MkSlider("FOV范围", 20, 500, CONFIG.Aimbot.FOV)
     fovSl.I.FocusLost:Connect(function(e)
         if e then local v = math.clamp(tonumber(fovSl.I.Text) or CONFIG.Aimbot.FOV, 20, 500)
             CONFIG.Aimbot.FOV = v; fovSl.S(v) end
     end)
 
-    -- 平滑度
     local smSl = MkSlider("平滑度", 0, 1, CONFIG.Aimbot.Smoothness)
     smSl.I.FocusLost:Connect(function(e)
         if e then local v = math.clamp(tonumber(smSl.I.Text) or CONFIG.Aimbot.Smoothness, 0, 1)
             CONFIG.Aimbot.Smoothness = v; smSl.S(v) end
     end)
 
-    -- 攻击距离
     local atSl = MkSlider("攻击距离", 5, 100, CONFIG.Aimbot.AutoFireRange)
     atSl.I.FocusLost:Connect(function(e)
         if e then local v = math.clamp(tonumber(atSl.I.Text) or CONFIG.Aimbot.AutoFireRange, 5, 100)
             CONFIG.Aimbot.AutoFireRange = v; atSl.S(v) end
     end)
 
-    -- ★修复: 悬浮窗改为TextButton，支持MouseButton1Click
+    -- 悬浮窗 (TextButton有MouseButton1Click)
     local ff = Instance.new("TextButton", sg); ff.Name = "FloatFrame"
     ff.Size = UDim2.new(0, 200, 0, 30); ff.Position = UDim2.new(0.5, -100, 0, 10)
     ff.BackgroundColor3 = Color3.fromRGB(35,35,35); ff.BackgroundTransparency = 0.1
@@ -446,20 +467,28 @@ end
 local function Init()
     CreateUI(); SetupMobile()
     for _, p in ipairs(Players:GetPlayers()) do MkESP(p) end
-    table.insert(ESP_Connections, Players.PlayerAdded:Connect(function(p) MkESP(p)
-        table.insert(ESP_Connections, p.CharacterAdded:Connect(function() task.wait(0.5); MkESP(p) end)) end))
+    table.insert(ESP_Connections, Players.PlayerAdded:Connect(function(p)
+        MkESP(p)
+        table.insert(ESP_Connections, p.CharacterAdded:Connect(function() task.wait(0.5); MkESP(p) end))
+    end))
     table.insert(ESP_Connections, Players.PlayerRemoving:Connect(RmESP))
-    table.insert(ESP_Connections, LocalPlayer.CharacterAdded:Connect(function() task.wait(1)
-        for _, p in ipairs(Players:GetPlayers()) do if p ~= LocalPlayer then MkESP(p) end end end))
+    table.insert(ESP_Connections, LocalPlayer.CharacterAdded:Connect(function()
+        task.wait(1)
+        for _, p in ipairs(Players:GetPlayers()) do if p ~= LocalPlayer then MkESP(p) end end
+    end))
     if not IsMobile then
         table.insert(ESP_Connections, UserInputService.InputBegan:Connect(function(inp, gp)
             if gp then return end
             if inp.KeyCode == Enum.KeyCode.RightShift then
                 local s = CoreGui:FindFirstChild("MyScriptUI")
                 if s then local m = s:FindFirstChild("MainFrame"); local f = s:FindFirstChild("FloatFrame")
-                    if m then local v = not m.Visible; m.Visible = v; if f then f.Visible = not v end end end end end))
+                    if m then local v = not m.Visible; m.Visible = v; if f then f.Visible = not v end end end
+            end
+        end))
     end
-    table.insert(ESP_Connections, LocalPlayer.OnTeleport:Connect(function(s) if s == Enum.TeleportState.Leaving then Clean() end end))
+    table.insert(ESP_Connections, LocalPlayer.OnTeleport:Connect(function(s)
+        if s == Enum.TeleportState.Leaving then Clean() end
+    end))
     Log("启动成功 "..(IsMobile and "移动端" or "PC端"), "OK")
     Notify("SCP异常站点", "脚本已加载 | 作者:B站英吉利超入", 3)
 end
@@ -469,7 +498,12 @@ Init()
 -- 主循环
 RunService.RenderStepped:Connect(function()
     pcall(UpdFOV)
-    if CONFIG.ESP.Enabled then pcall(UpdESP) else pcall(HideESP) end
+
+    if CONFIG.ESP.Enabled then
+        pcall(UpdESP)
+    else
+        pcall(HideESP)
+    end
 
     if CONFIG.Aimbot.Enabled then
         local active = IsMobile and TouchActive or UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2)
