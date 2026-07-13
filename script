@@ -6,7 +6,7 @@ local CONFIG = {
             HealthBar = true, TeamName = true, TracerOrigin = "Bottom", MaxDistance = 500,
             TeamCheck = true, Color = Color3.fromRGB(255, 50, 50) },
     Aimbot = { Enabled = false, FOV = 120, ShowFOV = true, AimAt = "Head",
-               TeamCheck = true, WallCheck = true, MaxDistance = 250, Smoothness = 0.6, Prediction = 0 },
+               TeamCheck = true, WallCheck = false, MaxDistance = 250, Smoothness = 0.6, Prediction = 0 },
 }
 
 local Players = game:GetService("Players")
@@ -18,30 +18,24 @@ local CoreGui = game:GetService("CoreGui")
 local LocalPlayer = Players.LocalPlayer
 local IsMobile = UserInputService.TouchEnabled and not UserInputService.MouseEnabled
 
-local Aimbot = { Target = nil, TargetPart = nil }
+local Aimbot = { Target = nil, TargetPart = nil, LastLog = 0 }
 local ESP_Objects = {}
 local ESP_Connections = {}
 local MobileTouchCons = {}
 
--- 队伍翻译
-local TeamNames = {
-    ["SCP"] = "SCP", ["MTF"] = "MTF", ["Chaos Insurgency"] = "混沌分裂者",
-    ["Class D"] = "D级人员", ["Scientists"] = "科学家", ["Spectator"] = "旁观者",
-    ["Foundation"] = "基金会", ["UIU"] = "UIU", ["GOC"] = "GOC",
-    ["Serpent's Hand"] = "蛇之手", ["Church of the Broken God"] = "破碎之神教会",
-    ["Anderson Robotics"] = "安德森机器人", ["Marshall, Carter & Dark"] = "MCD",
-    ["The Factory"] = "工厂", ["Gamemasters"] = "管理员",
-}
+-- 队伍判断：用Team对象（游戏有多队伍，同队不能攻击）
+local function IsSameTeam(plr)
+    if not plr.Team or not LocalPlayer.Team then return false end
+    return plr.Team == LocalPlayer.Team
+end
 
 local function GetTeamName(plr)
-    local team = plr.Team
-    if not team then return "无队伍" end
-    return TeamNames[team.Name] or team.Name
+    return plr.Team and plr.Team.Name or "无队伍"
 end
 
 local function GetTeamColor(plr)
     local team = plr.Team
-    return team and team.TeamColor.Color or Color3.fromRGB(180, 180, 180)
+    return team and team.TeamColor.Color or Color3.fromRGB(255, 50, 50)
 end
 
 local function Log(m, l)
@@ -59,11 +53,6 @@ local function IsValid(plr)
     if not hum or hum.Health <= 0 then return false end
     if plr:GetAttribute("InRun") == false then return false end
     return true
-end
-
-local function IsSameTeam(plr)
-    if not plr.Team or not LocalPlayer.Team then return false end
-    return plr.Team == LocalPlayer.Team
 end
 
 local function ShouldESP(plr)
@@ -215,11 +204,7 @@ local function UpdESP()
         end) end
     end
 end
--- ===== 自瞄+静默瞄准（合并，共用参数） =====
--- 自瞄：自动转向最近敌人
--- 静默：手动攻击时强制命中目标
--- 不自动攻击
-
+-- ===== 自瞄+静默瞄准 =====
 local function FindTarget()
     local cam = Workspace.CurrentCamera
     if not cam then return nil, nil end
@@ -256,27 +241,44 @@ local function FindTarget()
     return cp, cpart
 end
 
--- 自瞄转向
+-- ★修复: 同时修改Camera.CFrame和HumanoidRootPart.CFrame，双重保障
 local function AimAt(tg, tp)
     if not tg or not tp then return end
-    local mc = LocalPlayer.Character; if not mc then return end
-    local mr = mc:FindFirstChild("HumanoidRootPart"); if not mr then return end
-    local pos = tp.Position
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
+    local mc = LocalPlayer.Character
+    if not mc then return end
+    local mr = mc:FindFirstChild("HumanoidRootPart")
+    if not mr then return end
+
+    local targetPos = tp.Position
     if CONFIG.Aimbot.Prediction > 0 then
         local tr = tg.Character and tg.Character:FindFirstChild("HumanoidRootPart")
         if tr then
-            pos = pos + tr.Velocity * ((mr.Position - pos).Magnitude / 120) * CONFIG.Aimbot.Prediction
+            targetPos = targetPos + tr.Velocity * ((mr.Position - targetPos).Magnitude / 120) * CONFIG.Aimbot.Prediction
         end
     end
-    local cf = CFrame.lookAt(mr.Position, pos) * CFrame.Angles(0, math.rad(180), 0)
+
+    -- 同时改Camera和HumanoidRootPart
+    local camLook = CFrame.lookAt(cam.CFrame.Position, targetPos)
+    local rootLook = CFrame.lookAt(mr.Position, targetPos) * CFrame.Angles(0, math.rad(180), 0)
+
     if CONFIG.Aimbot.Smoothness < 1 then
-        mr.CFrame = mr.CFrame:Lerp(cf, 1 - CONFIG.Aimbot.Smoothness)
+        cam.CFrame = cam.CFrame:Lerp(camLook, 1 - CONFIG.Aimbot.Smoothness)
+        mr.CFrame = mr.CFrame:Lerp(rootLook, 1 - CONFIG.Aimbot.Smoothness)
     else
-        mr.CFrame = cf
+        cam.CFrame = camLook
+        mr.CFrame = rootLook
+    end
+
+    -- 调试日志（每3秒一次）
+    if tick() - Aimbot.LastLog > 3 then
+        Aimbot.LastLog = tick()
+        Log("瞄准: " .. tg.Name .. " | 队伍: " .. GetTeamName(tg) .. " | 距离: " .. string.format("%.0f", (mr.Position - tp.Position).Magnitude))
     end
 end
 
--- 静默命中：用户攻击时强制命中目标
+-- 静默命中
 local function SilentHit(tg, tp)
     if not tg or not tp then return end
     local mc = LocalPlayer.Character
@@ -305,16 +307,15 @@ local function SilentHit(tg, tp)
     end
     if not hitEvent then return end
     pcall(function() hitEvent:FireServer(tp) end)
+    Log("静默命中: " .. tg.Name, "OK")
 end
 
--- 监听用户攻击输入
 local function OnUserAttack()
     if not CONFIG.Aimbot.Enabled then return end
     if not Aimbot.Target or not Aimbot.TargetPart then return end
     SilentHit(Aimbot.Target, Aimbot.TargetPart)
 end
 
--- PC端：鼠标左键
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
     if input.UserInputType == Enum.UserInputType.MouseButton1 then
@@ -325,7 +326,6 @@ UserInputService.InputBegan:Connect(function(input, gp)
     end
 end)
 
--- 移动端：区分点击(tap)和滑动(drag)
 local touchStartPos = nil
 local touchStartTime = nil
 local TAP_DISTANCE = 30
@@ -349,7 +349,7 @@ UserInputService.TouchEnded:Connect(function(t, gp)
     touchStartTime = nil
 end)
 
--- ===== 移动端触摸（仅菜单开关） =====
+-- ===== 移动端 =====
 local MenuBtn = nil
 
 local function SetupMobile()
@@ -453,7 +453,7 @@ local function CreateUI()
         espBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    -- 队伍检测（ESP和瞄准共用）
+    -- 队伍检测（默认开启，用plr.Team判断）
     local tmBt = MkBtn("队伍检测（开启）", true)
     tmBt.MouseButton1Click:Connect(function()
         CONFIG.ESP.TeamCheck = not CONFIG.ESP.TeamCheck; CONFIG.Aimbot.TeamCheck = CONFIG.ESP.TeamCheck
@@ -461,7 +461,7 @@ local function CreateUI()
         tmBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    -- 瞄准系统（自瞄转向 + 静默命中，共用参数）
+    -- 瞄准系统
     local aimBt = MkBtn("瞄准系统（关闭）", false)
     aimBt.MouseButton1Click:Connect(function()
         CONFIG.Aimbot.Enabled = not CONFIG.Aimbot.Enabled; local s = CONFIG.Aimbot.Enabled
@@ -469,7 +469,6 @@ local function CreateUI()
         aimBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    -- 墙壁检测
     local wallBt = MkBtn("墙壁检测（关闭）", false)
     wallBt.MouseButton1Click:Connect(function()
         CONFIG.Aimbot.WallCheck = not CONFIG.Aimbot.WallCheck; local s = CONFIG.Aimbot.WallCheck
@@ -477,7 +476,6 @@ local function CreateUI()
         wallBt.BackgroundColor3 = s and Color3.fromRGB(60,160,60) or Color3.fromRGB(120,60,60)
     end)
 
-    -- FOV
     local fovBt = MkBtn("FOV圆圈（显示）", true)
     fovBt.MouseButton1Click:Connect(function()
         CONFIG.Aimbot.ShowFOV = not CONFIG.Aimbot.ShowFOV; local s = CONFIG.Aimbot.ShowFOV
@@ -503,7 +501,6 @@ local function CreateUI()
             CONFIG.Aimbot.MaxDistance = v; atSl.S(v) end
     end)
 
-    -- 悬浮窗
     local ff = Instance.new("TextButton", sg); ff.Name = "FloatFrame"
     ff.Size = UDim2.new(0, 200, 0, 30); ff.Position = UDim2.new(0.5, -100, 0, 10)
     ff.BackgroundColor3 = Color3.fromRGB(35,35,35); ff.BackgroundTransparency = 0.1
@@ -572,7 +569,6 @@ RunService.RenderStepped:Connect(function()
     pcall(UpdFOV)
     if CONFIG.ESP.Enabled then pcall(UpdESP) else pcall(HideESP) end
 
-    -- 瞄准系统：自瞄转向 + 静默命中
     if CONFIG.Aimbot.Enabled then
         local t, tp = FindTarget()
         if t then
